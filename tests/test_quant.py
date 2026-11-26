@@ -204,3 +204,18 @@ def test_onnx_qdq_only_in_int8_units(mixed, tmp_path):
     assert "ReduceMax" not in ops
     # export mode leaves the simulation model untouched
     assert mm.mode == "sim"
+
+
+def test_manual_fake_quant_matches_native():
+    from precisionpilot.quant.fakequant import QMAX, QMIN, _manual_fake_quant
+
+    torch.manual_seed(0)
+    x = torch.randn(4096) * 2
+    x[:4] = torch.tensor([0.5, 1.5, -0.5, -2.5]) * (1.0 / 127)  # exact ties
+    native = torch.fake_quantize_per_tensor_affine(x, 1.0 / 127, 0, QMIN, QMAX)
+    assert torch.equal(_manual_fake_quant(x, 1.0 / 127), native)
+    w = torch.randn(8, 3, 3, 3)
+    scale = w.abs().amax(dim=(1, 2, 3)) / 127
+    native_w = torch.fake_quantize_per_channel_affine(
+        w, scale, torch.zeros(8, dtype=torch.int32), 0, QMIN, QMAX)
+    assert torch.allclose(_manual_fake_quant(w, scale.view(-1, 1, 1, 1)), native_w, atol=1e-7)

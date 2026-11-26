@@ -218,6 +218,32 @@ cmd_export_onnx.add_args = lambda p: (
 )
 
 
+def cmd_demo(args) -> int:
+    from precisionpilot.demo.server import serve
+
+    cfg = _cfg(args)
+    results = cfg.resolve(args.results) if args.results else cfg.path("results_dir")
+    if args.fake:
+        cfg = _cfg_with(args, ["data.image_size=16"])
+    serve(cfg, results, args.host, args.port, fake=args.fake)
+    return 0
+
+
+def _cfg_with(args, extra: list[str]):
+    from precisionpilot.config import load_config
+
+    return load_config(args.config, [*extra, *args.overrides])
+
+
+cmd_demo.add_args = lambda p: (
+    p.add_argument("--results", default=None, help="results folder (default: results/)"),
+    p.add_argument("--host", default="127.0.0.1"),
+    p.add_argument("--port", type=int, default=8000),
+    p.add_argument("--fake", action="store_true",
+                   help="random weights + synthetic images (preview without a checkpoint)"),
+)
+
+
 COMMANDS: dict[str, tuple] = {
     "env-check": (cmd_env_check, "Print library/GPU versions and compatibility warnings"),
     "make-splits": (cmd_make_splits, "Download CIFAR-10 and create/verify data/splits.json"),
@@ -229,6 +255,7 @@ COMMANDS: dict[str, tuple] = {
     "report": (cmd_report, "Regenerate all figures and summary tables"),
     "pipeline": (cmd_pipeline, "End-to-end smoke run (--smoke) on synthetic data"),
     "export-onnx": (cmd_export_onnx, "Export one configuration to ONNX with Q/DQ"),
+    "demo": (cmd_demo, "Start the web demo on http://127.0.0.1:8000"),
 }
 
 

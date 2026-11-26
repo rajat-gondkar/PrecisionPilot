@@ -34,23 +34,26 @@ def notebook(cells: list[dict]) -> dict:
     }
 
 
-SETUP = f"""
+def setup(base: str) -> str:
+    return f"""
 import os, subprocess, sys
-os.chdir("/kaggle/working")
+os.makedirs("{base}", exist_ok=True)
+os.chdir("{base}")
 if not os.path.exists("PrecisionPilot"):
     subprocess.run(["git", "clone", "--depth", "1", "{REPO}"], check=True)
-os.chdir("/kaggle/working/PrecisionPilot")
+os.chdir("{base}/PrecisionPilot")
 subprocess.run(["git", "pull", "--ff-only"], check=False)
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-e", "."], check=True)
 print(subprocess.run(["git", "log", "-1", "--oneline"], capture_output=True, text=True).stdout)
 """
 
+
 FINETUNE = notebook([
     md("""
 # PrecisionPilot — 01 · Fine-tune ResNet-18 on CIFAR-10 (224 px)
 
-**Before running:** *Settings → Accelerator → GPU T4 x1* and *Settings → Internet → On*.
-Then *Run All*. The run takes roughly 15–25 minutes on a T4.
+**Before running:** *Settings → Accelerator → GPU T4* and *Settings → Internet → On*.
+Then *Run All*. The run takes roughly 10 minutes on a T4.
 
 What it does:
 1. clones the PrecisionPilot repo and installs it,
@@ -65,7 +68,7 @@ What it does:
 (Mac and Windows). Also download `baselines_t4.json` into `results/baselines/`.
 """),
     code("!nvidia-smi"),
-    code(SETUP),
+    code(setup("/kaggle/working")),
     code("!python -m precisionpilot env-check"),
     md("### Data splits\nThe split file is committed in the repo, so every machine uses "
        "identical indices. This cell downloads CIFAR-10 and verifies the splits."),
@@ -88,51 +91,94 @@ BENCHMARK = notebook([
     md("""
 # PrecisionPilot — 02 · T4 accuracy table + TensorRT benchmark
 
-**Before running:**
-1. *Settings → Accelerator → GPU T4* (x1 or x2; only GPU 0 is used) and *Internet → On*.
-2. *Add Input* → **Notebook Output** → pick your run of `01 · Fine-tune` (it contains
-   `resnet18_cifar10.pt`). Alternatively upload the checkpoint as a Kaggle Dataset.
-3. *Run All*. Expected time: roughly 1–2 hours (mostly TensorRT engine builds and the
-   1,024-config accuracy table).
+## Run it unattended (so you can sleep)
+1. *Settings → Accelerator → GPU T4* (x1 or x2) and *Internet → On*.
+2. Right panel → *Add Input → Datasets* → your dataset containing `resnet18_cifar10.pt`
+   (one-time: kaggle.com → *Datasets* → *New Dataset* → upload
+   `checkpoints/resnet18_cifar10.pt`).
+3. Click **Save Version → Save & Run All (Commit)** (not plain *Run All*). It then runs in the
+   background on Kaggle's servers: you can close the browser or sleep. A committed run may take
+   up to 12 hours; this one should take roughly 1–2 hours. The finished version and its output
+   files are kept permanently.
+4. When you are back: open the notebook → *Versions* (or the *Output* tab of the latest
+   version) → download **`precisionpilot_results_t4.zip`** and unzip it into the repo root.
 
-What it does:
-1. installs PrecisionPilot + TensorRT 10 and checks versions,
-2. **hardware-independent accuracy** (`run-accuracy`): FP32 / FP16 / INT8 references,
-   accuracy of all 1,024 configurations on the validation subset, per-unit sensitivity,
-3. **T4 latency study** (`run-gpu --backend trt`): per-unit lookup table for batch 1/8/32,
-   all search methods x budgets, full-engine verification, real TensorRT test accuracy,
-4. builds the figures and zips `results/` for download.
+This notebook never stops at the first failure: every stage runs, the results are zipped after
+each stage, and `status.json` records which stages succeeded. Whatever finished is in the zip.
 
-**After it finishes:** download `precisionpilot_results_t4.zip` and unzip it into the repo
-root on your Mac (it fills `results/accuracy/`, `results/t4/`, `results/figures/`,
-`results/tables/`). The accuracy files are needed by the Windows benchmark run.
+## What it does
+1. installs PrecisionPilot + TensorRT 10 and checks versions (work happens in `/tmp`, so only the
+   zip and logs are saved as output),
+2. **hardware-independent accuracy** (`run-accuracy`): FP32 / FP16 / INT8 references, accuracy of
+   all 1,024 configurations on the validation subset, per-unit sensitivity,
+3. **T4 latency study** (`run-gpu --backend trt`): per-unit lookup table for batch 1/8/32, all
+   search methods x budgets, full-engine verification, real TensorRT test accuracy,
+4. builds the figures and tables.
 """),
     code("!nvidia-smi"),
-    code(SETUP),
-    code("!pip install -q \"tensorrt-cu12>=10.0,<11\""),
-    code("!python -m precisionpilot env-check"),
+    code(setup("/tmp/pp")),
     code("""
-import glob, os, shutil
+import glob, json, os, shutil, subprocess, sys, time
+
+STATUS = {}
+
+def run(cmd, label):
+    \"\"\"Run a shell command, stream its output, never raise.\"\"\"
+    print(f"\\n===== {label} =====", flush=True)
+    t0 = time.time()
+    p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, bufsize=1)
+    for line in p.stdout:
+        print(line, end="", flush=True)
+    rc = p.wait()
+    STATUS[label] = {"exit_code": rc, "seconds": round(time.time() - t0)}
+    print(f"===== {label}: exit {rc} after {time.time() - t0:.0f}s =====", flush=True)
+    save_outputs()
+    return rc
+
+def save_outputs():
+    \"\"\"Zip everything produced so far into /kaggle/working (overwrites the previous zip).\"\"\"
+    if os.path.isdir("results"):
+        shutil.make_archive("/kaggle/working/precisionpilot_results_t4", "zip", ".", "results")
+    with open("/kaggle/working/status.json", "w") as f:
+        json.dump(STATUS, f, indent=2)
+"""),
+    code("""
+run(f"{sys.executable} -m pip install -q 'tensorrt-cu12>=10.0,<11'", "install tensorrt")
+run(f"{sys.executable} -m precisionpilot env-check", "env-check")
+"""),
+    code("""
 os.makedirs("checkpoints", exist_ok=True)
 found = sorted(glob.glob("/kaggle/input/**/resnet18_cifar10.pt", recursive=True))
-assert found, "Add the fine-tuning notebook output (or a dataset with the checkpoint) as input"
+assert found, ("resnet18_cifar10.pt not found under /kaggle/input. Add your checkpoint "
+               "Dataset via the right panel: Add Input -> Datasets.")
 shutil.copy(found[0], "checkpoints/resnet18_cifar10.pt")
 js = glob.glob(os.path.join(os.path.dirname(found[0]), "resnet18_cifar10.json"))
 if js:
     shutil.copy(js[0], "checkpoints/")
 print("checkpoint:", found[0])
 """),
-    code("!python -m precisionpilot make-splits"),
-    code("!python -m precisionpilot evaluate --device cuda"),
-    md("### Hardware-independent accuracy (reference, 1,024-config table, sensitivity)"),
-    code("!python -m precisionpilot run-accuracy --device cuda"),
-    md("### T4 latency study with TensorRT"),
-    code("!python -m precisionpilot run-gpu --device cuda --backend trt"),
-    code("!python -m precisionpilot report"),
     code("""
-import shutil
-shutil.make_archive("/kaggle/working/precisionpilot_results_t4", "zip", ".", "results")
-print("download: /kaggle/working/precisionpilot_results_t4.zip")
+PY = sys.executable
+run(f"{PY} -m precisionpilot make-splits", "make-splits")
+run(f"{PY} -m precisionpilot evaluate --device cuda", "evaluate (FP32 / FP16 baselines)")
+"""),
+    md("### Stage 1 — hardware-independent accuracy (reference, 1,024-config table, sensitivity)"),
+    code("""run(f"{PY} -m precisionpilot run-accuracy --device cuda", "run-accuracy")"""),
+    md("### Stage 2 — T4 latency study with TensorRT\n"
+       "Engines are cached in `/tmp` (not saved as output)."),
+    code("""
+run(f"{PY} -m precisionpilot run-gpu --device cuda --backend trt "
+    "--set paths.engine_cache=/tmp/engine_cache", "run-gpu (TensorRT)")
+"""),
+    md("### Stage 3 — figures and tables"),
+    code("""run(f"{PY} -m precisionpilot report", "report")"""),
+    code("""
+save_outputs()
+print(json.dumps(STATUS, indent=2))
+failed = [k for k, v in STATUS.items() if v["exit_code"] != 0]
+print("\\nFAILED STAGES:", failed if failed else "none")
+print("Download: precisionpilot_results_t4.zip (+ status.json)")
 """),
 ])
 

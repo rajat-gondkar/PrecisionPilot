@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PrecisionPilot</title>
+  <meta name="description" content="Sensitivity-guided FP16/INT8 mixed-precision selection for ResNet-18.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap topbar__inner">
+      <a class="wordmark" href="#explore" aria-label="PrecisionPilot home">
+        <span class="wordmark__mark" aria-hidden="true"></span>PrecisionPilot
+      </a>
+      <nav class="nav" aria-label="Sections">
+        <a href="#explore">Explore</a>
+        <a href="#predict">Predict</a>
+        <a href="#method">Method</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <!-- ======================================================== Explore -->
+    <section id="explore" class="section wrap">
+      <p class="eyebrow">ResNet-18 · CIFAR-10 · TensorRT</p>
+      <h1>Mixed precision, chosen unit by unit.</h1>
+      <p class="lede">
+        Pick a GPU, a batch size and how much accuracy you can give up. PrecisionPilot decides
+        which of the network's ten units run in INT8, using a couple of dozen evaluations
+        instead of all 1,024 combinations.
+      </p>
+
+      <div class="notice" id="notice" hidden></div>
+
+      <form class="controls" id="controls" aria-label="Selection settings">
+        <fieldset class="control">
+          <legend class="label">GPU</legend>
+          <div class="segmented" id="gpu-options" role="radiogroup"></div>
+        </fieldset>
+        <fieldset class="control">
+          <legend class="label">Batch size</legend>
+          <div class="segmented" id="bs-options" role="radiogroup"></div>
+        </fieldset>
+        <div class="control control--grow">
+          <label class="label" for="budget">Accuracy budget
+            <span class="label__hint">max drop vs FP32</span></label>
+          <div class="slider">
+            <input type="range" id="budget" min="0" max="3" step="0.1" value="1">
+            <output id="budget-out" for="budget" class="mono">1.0 pp</output>
+          </div>
+        </div>
+      </form>
+
+      <div class="block">
+        <div class="block__head">
+          <h2>Selected configuration</h2>
+          <div class="legend" aria-hidden="true">
+            <span><i class="swatch swatch--fp16"></i>FP16</span>
+            <span><i class="swatch swatch--int8"></i>INT8</span>
+          </div>
+        </div>
+        <ol class="units" id="units" aria-label="Precision per unit"></ol>
+      </div>
+
+      <dl class="metrics" id="metrics"></dl>
+
+      <div class="block">
+        <div class="block__head">
+          <h2>Against the baselines</h2>
+          <p class="muted small" id="compare-note"></p>
+        </div>
+        <div class="table-wrap">
+          <table class="table" id="compare">
+            <thead>
+              <tr>
+                <th scope="col">Method</th>
+                <th scope="col">Configuration</th>
+                <th scope="col" class="num">Accuracy change</th>
+                <th scope="col" class="num">Latency</th>
+                <th scope="col" class="num">Speedup</th>
+                <th scope="col" class="num">Evaluations</th>
+                <th scope="col">Budget</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================================================== Predict -->
+    <section id="predict" class="section section--alt">
+      <div class="wrap">
+        <p class="eyebrow">Live inference</p>
+        <h2 class="h1-sm">See what INT8 changes.</h2>
+        <p class="lede">
+          Choose a CIFAR-10 test image or upload your own. The same image runs through the FP32
+          reference and through the configuration selected above.
+        </p>
+
+        <div class="predict">
+          <div>
+            <div class="gallery" id="gallery" aria-label="Sample images"></div>
+            <label class="button button--ghost" for="upload">
+              Upload an image
+              <input type="file" id="upload" accept="image/*" hidden>
+            </label>
+          </div>
+
+          <div class="result" id="result" aria-live="polite">
+            <p class="muted">Select an image to compare predictions.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================================================== Method -->
+    <section id="method" class="section wrap">
+      <p class="eyebrow">How it works</p>
+      <h2 class="h1-sm">Three cheap steps, then one check.</h2>
+      <ol class="steps">
+        <li>
+          <span class="steps__n mono">01</span>
+          <h3>Scan</h3>
+          <p>Quantize one unit at a time to INT8 while the rest stay FP16 and measure the
+             accuracy drop. Eleven evaluations.</p>
+        </li>
+        <li>
+          <span class="steps__n mono">02</span>
+          <h3>Score</h3>
+          <p>Rank units by latency saved per accuracy point lost, using per-unit timings
+             measured on the target GPU at the target batch size.</p>
+        </li>
+        <li>
+          <span class="steps__n mono">03</span>
+          <h3>Flip</h3>
+          <p>Starting from all-FP16, switch units to INT8 in rank order and back off any flip
+             that would exceed the budget.</p>
+        </li>
+      </ol>
+      <p class="muted small method-note">
+        Every selection is compared against exhaustive search over all 1,024 configurations.
+        Accuracies are measured on a validation split; test-set numbers are reported only for
+        the final choice.
+      </p>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap footer__inner">
+      <span>PrecisionPilot</span>
+      <span class="muted" id="footer-source"></span>
+    </div>
+  </footer>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

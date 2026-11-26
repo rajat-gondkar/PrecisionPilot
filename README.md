@@ -70,16 +70,27 @@ python -m precisionpilot run-gpu          # LUT + all searches + verification + 
 python -m precisionpilot report           # regenerate figures and tables from results/
 python -m precisionpilot pipeline --smoke # end-to-end check on synthetic data (~20 s)
 python -m precisionpilot export-onnx --cfg-bits 0111111110   # one config -> ONNX (Q/DQ)
+python -m precisionpilot demo             # web demo on http://127.0.0.1:8000
 ```
 On machines without a CUDA GPU, the CLI limits PyTorch to 2 CPU threads by default
 (override with `--threads N`).
+
+## Demo
+
+```bash
+python -m precisionpilot demo                                # real results in results/
+python -m precisionpilot demo --results results/smoke --fake # preview after `pipeline --smoke`
+```
+Open http://127.0.0.1:8000. The demo needs the result files (`results/accuracy/`, at least one
+`results/<gpu>/lut.csv`) and, for live predictions, the checkpoint and CIFAR-10. It runs on
+CPU, MPS or CUDA.
 
 ## Running the experiments
 
 | Step | Where | Command / notebook | Produces |
 |---|---|---|---|
 | 1. Fine-tune | Kaggle T4 | `notebooks/kaggle_01_finetune.ipynb` | `checkpoints/resnet18_cifar10.pt` |
-| 2. Accuracy + T4 latency | Kaggle T4 (add step 1's output as input) | `notebooks/kaggle_02_t4_benchmark.ipynb` | `results/accuracy/*`, `results/t4/*` (download the zip, unzip in the repo root) |
+| 2. Accuracy + T4 latency | Kaggle T4 (attach the checkpoint as a Dataset; use **Save & Run All (Commit)** to run unattended) | `notebooks/kaggle_02_t4_benchmark.ipynb` | `results/accuracy/*`, `results/t4/*` (download the zip, unzip in the repo root) |
 | 3. RTX 3050 Ti latency | Windows laptop | see below | `results/rtx3050ti/*` |
 | 4. Figures and tables | anywhere | `python -m precisionpilot report` | `results/figures/`, `results/tables/` |
 
@@ -103,9 +114,8 @@ Any config value can be overridden from the CLI, e.g.
 
 ```
 configs/            YAML configuration (accuracy budget is fixed here)
-src/precisionpilot/ library + CLI
+src/precisionpilot/ library + CLI (demo web app in src/precisionpilot/demo/)
 notebooks/          Kaggle notebooks (training, T4 benchmark)
-demo/               lightweight web demo (FastAPI + vanilla JS)
 tests/              pytest suite (CPU; GPU/TRT tests auto-skip)
 results/            small result tables/figures committed to git
 ```

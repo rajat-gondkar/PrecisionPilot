@@ -68,10 +68,8 @@ def test_search_suite_and_chosen_configs(ws, table):
     assert md.count("\n") == 5 and "|" in md
 
 
-def test_smoke_pipeline_end_to_end(tmp_path):
-    from precisionpilot.experiments.pipeline import smoke
-
-    figs = smoke([f"paths.results_dir={tmp_path}"], log=lambda *_: None)
+def test_smoke_pipeline_end_to_end(smoke_results):
+    tmp_path, figs = smoke_results
     assert len(figs) >= 10 and all(p.exists() for p in figs)
     for f in ["accuracy/reference.json", "accuracy/accuracy_table.csv",
               "accuracy/sensitivity.csv", "accuracy/final_test.csv",

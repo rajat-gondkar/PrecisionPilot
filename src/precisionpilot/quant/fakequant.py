@@ -27,8 +27,20 @@ def _symmetric_scale(amax: torch.Tensor) -> torch.Tensor:
     return torch.clamp(amax, min=1e-8) / 127.0
 
 
+def _native_fq_device(x: torch.Tensor) -> bool:
+    """CPU / CUDA have fused fake-quant kernels; MPS (Apple) does not."""
+    return x.device.type in {"cpu", "cuda"} or torch.onnx.is_in_onnx_export()
+
+
+def _manual_fake_quant(x: torch.Tensor, scale: torch.Tensor | float) -> torch.Tensor:
+    # identical maths: round-half-to-even, clamp to [QMIN, QMAX], dequantize
+    return torch.clamp(torch.round(x / scale), QMIN, QMAX) * scale
+
+
 def fake_quant_per_tensor(x: torch.Tensor, amax: float) -> torch.Tensor:
     scale = float(max(amax, 1e-8) / 127.0)
+    if not _native_fq_device(x):
+        return _manual_fake_quant(x, scale)
     return torch.fake_quantize_per_tensor_affine(x, scale, 0, QMIN, QMAX)
 
 
@@ -41,6 +53,10 @@ def fake_quant_weight_per_channel(w: torch.Tensor, axis: int = 0,
                                   scale: torch.Tensor | None = None) -> torch.Tensor:
     if scale is None:
         scale = weight_scale_per_channel(w, axis)
+    if not _native_fq_device(w):
+        shape = [1] * w.dim()
+        shape[axis] = -1
+        return _manual_fake_quant(w, scale.to(w.device).view(shape))
     zp = torch.zeros_like(scale, dtype=torch.int32)
     return torch.fake_quantize_per_channel_affine(w, scale, zp, axis, QMIN, QMAX)
 

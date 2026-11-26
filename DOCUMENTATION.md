@@ -2,7 +2,7 @@
 
 *Living technical documentation and report source. Updated at the end of every project phase.*
 
-**Status:** Phases 0–6 implemented. Kaggle fine-tuning is in progress; TensorRT benchmarks are pending.
+**Status:** Phases 0–7 implemented. Fine-tuning is done (§7.4); TensorRT benchmarks on the T4 and RTX 3050 Ti are pending.
 
 ---
 
@@ -379,6 +379,36 @@ The whole chain is checked end to end by `python -m precisionpilot pipeline --sm
 uses synthetic data, random weights and two mock GPU profiles; its numbers only show that the
 code works and are not results.
 
+### 7.5 Interactive demo (`src/precisionpilot/demo/`)
+`python -m precisionpilot demo` starts a small FastAPI server with a single-page frontend
+written in plain HTML, CSS and JavaScript, with no build step.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/meta` | GPUs and batch sizes with results, unit names, reference accuracies, sensitivity |
+| `GET /api/select?gpu&batch_size&budget` | Greedy selection for **any** budget (0–10 pp), computed live from the exhaustive accuracy table and that GPU's latency table, with the exhaustive optimum, all-FP16 and all-INT8 for comparison. Measured TensorRT latency and test accuracy are attached where they exist |
+| `GET /api/samples` | CIFAR-10 test images |
+| `GET /api/predict?sample_id&config` | Top-3 class probabilities from FP32 and from the chosen mixed-precision configuration |
+| `POST /api/upload?config` | The same, for an uploaded image (centre-cropped and resized to 32×32) |
+
+The page has three sections:
+- **Explore:** GPU, batch-size and budget controls; a strip showing each of the 10 units as
+  FP16 or INT8 with its sensitivity; four headline numbers (speedup, latency, accuracy change,
+  evaluations used); and a comparison table against the baselines.
+- **Predict:** live inference on sample or uploaded images.
+- **Method:** a three-step explanation.
+
+Design:
+- One token system: a 4 px spacing scale, two type families (Inter and JetBrains Mono), a
+  neutral palette with one blue ramp that matches the report figures, one radius and one
+  shadow.
+- Selected light and dark themes, a responsive grid checked at 390 px and 1280 px, and
+  reduced-motion support.
+- Precision is always shown as text ("FP16"/"INT8") as well as colour.
+
+On Apple GPUs (MPS), which have no fused fake-quantization kernels, an equivalent hand-written
+quantize step is used. A test checks that it matches the native kernel bit for bit.
+
 ## 8. Limitations
 
 *(Collected throughout the project.)*
@@ -414,6 +444,7 @@ See [README.md](README.md) for environment setup on macOS, Windows and Kaggle. A
 | `tests/test_sensitivity.py` | distinct-evaluation counting, sensitivity scan cost (N+1) and drops, scoring order, exclusion of units that are slower in INT8 |
 | `tests/test_latency.py` | timing statistics, mock backend determinism and profiles, LUT build / estimate / save / load, verification error; `gpu`/`trt`-marked real-hardware tests (TensorRT engine build, engine cache, TRT vs simulated accuracy) |
 | `tests/test_experiments.py` | prefix-tree exhaustive table equals direct per-config evaluation; search suite invariants (exhaustive gap 0, nothing beats the optimum, search-time accounting, random curve); chosen configs; summary table; end-to-end smoke pipeline (all result files + figures); CLI |
+| `tests/test_demo.py` | page and static files; `/api/meta`; selection at arbitrary budgets (optimum costs 1,024 evaluations, greedy feasible and never better than the optimum, budget 0 gives no accuracy loss); input validation (unknown GPU or batch size, out-of-range budget, malformed config); sample and uploaded-image prediction; unreadable upload; not-ready state |
 | `tests/test_search.py` | 25 random synthetic problems with interacting units: greedy is always feasible, exhaustive equals brute force, local search never makes things worse; greedy optimal on additive problems; skip vs stop; fallbacks; random-search reproducibility and evaluation budget; neighbourhood; gap and Pareto front |
 
 ## 11. Project log
@@ -427,7 +458,7 @@ See [README.md](README.md) for environment setup on macOS, Windows and Kaggle. A
 | 4 | Greedy / random / exhaustive / local search | done |
 | 5 | Experiments 1–6, Kaggle T4 benchmark | done (GPU runs pending) |
 | 6 | Plots and summary tables | done |
-| 7 | Web demo | — |
+| 7 | Web demo | done |
 | 8 | Final documentation | — |
 
 ## 12. References

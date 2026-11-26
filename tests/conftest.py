@@ -25,3 +25,13 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_gpu)
         if "trt" in item.keywords and not (torch.cuda.is_available() and _has_trt()):
             item.add_marker(skip_trt)
+
+
+@pytest.fixture(scope="session")
+def smoke_results(tmp_path_factory):
+    """Run the smoke pipeline once per session; returns (results_dir, figures)."""
+    from precisionpilot.experiments.pipeline import smoke
+
+    out = tmp_path_factory.mktemp("smoke_results")
+    figs = smoke([f"paths.results_dir={out}"], log=lambda *_: None)
+    return out, figs

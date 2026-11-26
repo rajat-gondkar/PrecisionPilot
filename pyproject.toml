@@ -30,6 +30,9 @@ precisionpilot = "precisionpilot.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+precisionpilot = ["demo/static/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
