@@ -2,7 +2,7 @@
 
 *Living technical documentation and report source. Updated at the end of every project phase.*
 
-**Status:** Phases 0–4 implemented. GPU runs (Kaggle fine-tuning, TensorRT benchmarks) are pending.
+**Status:** Phases 0–6 implemented. Kaggle fine-tuning is in progress; TensorRT benchmarks are pending.
 
 ---
 
@@ -277,14 +277,107 @@ is committed so that every machine uses identical indices (`src/precisionpilot/d
 
 ## 7. Experiments and results
 
+### 7.1 How the experiments are run (`src/precisionpilot/experiments/`)
+Accuracy does not depend on the GPU, but latency does. The work is therefore split into an
+accuracy stage that runs once and a latency stage that runs on every GPU:
+
+| Stage | Module | Runs on | Outputs |
+|---|---|---|---|
+| `run-accuracy` | `experiments/accuracy.py` | Kaggle T4 | `results/accuracy/reference.json` (FP32 / all-FP16 / all-INT8 on val_subset, val and test, plus seconds per evaluation), `accuracy_table.csv` (all 1,024 configs on val_subset), `sensitivity.csv` (Experiment 1, full val) |
+| `run-gpu` | `experiments/pipeline.py`, `search_suite.py`, `verify.py` | RTX 3050 Ti and T4 | `results/<gpu>/lut.csv`, `search_results.csv`, `random_curve.csv`, `verify.csv`, `engine_accuracy.csv`; `results/accuracy/final_test.csv` |
+| `report` | `analysis/report.py` | anywhere | `results/figures/*.png`, `results/tables/*.md / .csv` |
+
+**Exhaustive accuracy table (prefix-tree evaluation).**
+- Configurations that share their first *k* unit precisions also share the activations after
+  unit *k*. A depth-first walk over the binary prefix tree therefore costs
+  2 + 4 + … + 2^10 = 2,046 unit forwards per batch, instead of 10 × 1,024 = 10,240.
+- The walk and the normal forward pass use the same `run_unit` code path, so the table gives
+  **exactly** the accuracy a direct evaluation would; `tests/test_experiments.py` checks this.
+
+**How search cost is charged.**
+- Every search replays accuracies from this table, but is still charged one evaluation per
+  distinct configuration it queries.
+- Reported search time is *evaluations × measured seconds per evaluation* (`sec_per_eval` in
+  `reference.json`).
+- The searches make exactly the same decisions they would make running the model live.
+
+**Search suite (Experiments 2–5).**
+- For each GPU × batch size {1, 8, 32} × budget {0.5, 1, 2} pp, the suite runs: all-FP16,
+  all-INT8, greedy-skip, greedy-stop, greedy-skip + local search, random search (20 seeds,
+  each with the same number of evaluations as greedy-skip), and exhaustive search.
+- It records the configuration, validation accuracy, drop vs FP32, estimated latency, speedup
+  over all-FP16, gap to the optimum, number of evaluations and estimated search time.
+- `random_curve.csv` records random search's mean, std and median gap to the optimum at 5 …
+  1,024 evaluations; this feeds the main chart.
+
+**Verification (Experiment 6).**
+- For each batch size, the configurations worth reporting are built as full TensorRT engines
+  and timed. These are all-FP16, all-INT8, and greedy, greedy + local search, exhaustive and
+  the median random result at each budget.
+- Measured median and p95 latency, throughput, engine size and activation memory are compared
+  with the lookup-table estimate.
+- The same engines are also run on the test split, giving **real** INT8 accuracy
+  (`engine_accuracy.csv`) alongside the simulated test accuracy (`final_test.csv`).
+
+### 7.2 Figures (`src/precisionpilot/analysis/`)
+| Figure | File | Shows |
+|---|---|---|
+| 1 | `fig1_sensitivity.png` | Accuracy drop per unit when only that unit is INT8 |
+| 2 | `fig2_cost_vs_quality_<gpu>_bs<b>.png` | **Main result:** latency gap to optimum vs number of evaluations; random curve (mean ± std) vs greedy variants vs exhaustive |
+| 3 | `fig3_acc_vs_latency_<gpu>_bs<b>.png` | All 1,024 configurations, the budget line, baselines and the chosen configurations |
+| 4 | `fig4_heatmap_<gpu>.png`, `fig4_heatmap_optimum_<gpu>.png` | INT8 vs FP16 per unit, for every batch size × budget (greedy and optimum) |
+| 5 | `fig5_heatmap_gpus.png` | Greedy selections side by side across GPUs |
+| 6 | `fig6_speedups.png` | Estimated speedup over all-FP16 by batch size and GPU |
+| 7 | `fig7_lut_error.png` | Lookup-table estimate vs measured latency |
+
+Tables: `summary.md/csv` (every method × GPU × batch × budget, with random search averaged
+over seeds), `sensitivity.md`, `verify.md`, `final_test.md`.
+
+Figure style:
+- A fixed colour per method: the proposed greedy method is blue, random search orange and
+  exhaustive search aqua. Baselines are neutral gray with direct labels.
+- The heatmap uses a light and a dark step of a single blue ramp, with the text "FP16" or
+  "INT8" in every cell, so it doesn't rely on colour alone.
+
+### 7.3 Status
 | # | Experiment | What it shows | Status |
 |---|---|---|---|
-| 1 | Per-unit sensitivity scan | Which units are fragile | pending |
-| 2 | Search cost vs result quality | Evaluations vs final latency (main chart) | pending |
-| 3 | Accuracy budget sweep (0.5/1/2 pp) | Config change with budget | pending |
-| 4 | Batch-size variation (1/8/32) | Config change with batch size | pending |
-| 5 | Second GPU (T4) | Hardware dependence | pending |
-| 6 | Latency estimation accuracy | LUT vs real TensorRT | pending |
+| 1 | Per-unit sensitivity scan | Which units are fragile | implemented; awaiting GPU run |
+| 2 | Search cost vs result quality | Evaluations vs final latency (main chart) | implemented; awaiting GPU run |
+| 3 | Accuracy budget sweep (0.5/1/2 pp) | Config change with budget | implemented; awaiting GPU run |
+| 4 | Batch-size variation (1/8/32) | Config change with batch size | implemented; awaiting GPU run |
+| 5 | Second GPU (T4) | Hardware dependence | implemented; awaiting GPU run |
+| 6 | Latency estimation accuracy | LUT vs real TensorRT | implemented; awaiting GPU run |
+
+### 7.4 Result: fine-tuning and FP32/FP16 baselines (Kaggle Tesla T4)
+Training ran for 8 epochs (3,000 steps) with AMP and took **426 s** (~52 s per epoch). The log
+is in `checkpoints/resnet18_cifar10.json`.
+
+| Epoch | Train loss | Train acc (%) | Spare acc (%) |
+|---|---|---|---|
+| 1 | 0.962 | 81.66 | 95.9 |
+| 2 | 0.679 | 94.44 | 95.6 |
+| 3 | 0.633 | 96.27 | 95.7 |
+| 4 | 0.606 | 97.44 | 96.6 |
+| 5 | 0.585 | 98.35 | 96.7 |
+| 6 | 0.574 | 98.73 | 97.3 |
+| 7 | 0.566 | 99.05 | 97.2 |
+| 8 | 0.563 | 99.18 | 97.1 |
+
+(Training loss includes label smoothing of 0.1, which is why it stays well above zero.)
+
+| Split | FP32 top-1 (%) | All-FP16 top-1 (%) | n |
+|---|---|---|---|
+| Validation | **95.86** | 95.88 | 5,000 |
+| Test | **96.48** | 96.46 | 5,000 |
+
+The target of at least 95% is met. All-FP16 matches FP32 to within ±0.02 pp, so FP16 is a
+safe reference precision and the accuracy budget is effectively spent on INT8 alone.
+Source: `results/baselines/baselines_t4.json`.
+
+The whole chain is checked end to end by `python -m precisionpilot pipeline --smoke`. That run
+uses synthetic data, random weights and two mock GPU profiles; its numbers only show that the
+code works and are not results.
 
 ## 8. Limitations
 
@@ -320,6 +413,7 @@ See [README.md](README.md) for environment setup on macOS, Windows and Kaggle. A
 | `tests/test_quant.py` | config encoding; fake-quant error ≤ scale/2, idempotence, grid and clipping; per-channel scales; minmax/percentile calibration; exact BN folding; mixed-model calibration, FP16/INT8 error ordering, config switching; ONNX Q/DQ placement and constant scales |
 | `tests/test_sensitivity.py` | distinct-evaluation counting, sensitivity scan cost (N+1) and drops, scoring order, exclusion of units that are slower in INT8 |
 | `tests/test_latency.py` | timing statistics, mock backend determinism and profiles, LUT build / estimate / save / load, verification error; `gpu`/`trt`-marked real-hardware tests (TensorRT engine build, engine cache, TRT vs simulated accuracy) |
+| `tests/test_experiments.py` | prefix-tree exhaustive table equals direct per-config evaluation; search suite invariants (exhaustive gap 0, nothing beats the optimum, search-time accounting, random curve); chosen configs; summary table; end-to-end smoke pipeline (all result files + figures); CLI |
 | `tests/test_search.py` | 25 random synthetic problems with interacting units: greedy is always feasible, exhaustive equals brute force, local search never makes things worse; greedy optimal on additive problems; skip vs stop; fallbacks; random-search reproducibility and evaluation budget; neighbourhood; gap and Pareto front |
 
 ## 11. Project log
@@ -331,8 +425,8 @@ See [README.md](README.md) for environment setup on macOS, Windows and Kaggle. A
 | 2 | Simulated INT8, calibration, sensitivity scan, ONNX Q/DQ export | done |
 | 3 | Latency harness, backends, lookup table, TensorRT verification | done (TensorRT runs pending on GPU machines) |
 | 4 | Greedy / random / exhaustive / local search | done |
-| 5 | Experiments 1–6, Kaggle T4 benchmark | — |
-| 6 | Plots and summary tables | — |
+| 5 | Experiments 1–6, Kaggle T4 benchmark | done (GPU runs pending) |
+| 6 | Plots and summary tables | done |
 | 7 | Web demo | — |
 | 8 | Final documentation | — |
 

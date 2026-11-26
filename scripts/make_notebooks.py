@@ -84,10 +84,64 @@ for f in ["checkpoints/resnet18_cifar10.pt", "checkpoints/resnet18_cifar10.json"
 ])
 
 
+BENCHMARK = notebook([
+    md("""
+# PrecisionPilot — 02 · T4 accuracy table + TensorRT benchmark
+
+**Before running:**
+1. *Settings → Accelerator → GPU T4* (x1 or x2; only GPU 0 is used) and *Internet → On*.
+2. *Add Input* → **Notebook Output** → pick your run of `01 · Fine-tune` (it contains
+   `resnet18_cifar10.pt`). Alternatively upload the checkpoint as a Kaggle Dataset.
+3. *Run All*. Expected time: roughly 1–2 hours (mostly TensorRT engine builds and the
+   1,024-config accuracy table).
+
+What it does:
+1. installs PrecisionPilot + TensorRT 10 and checks versions,
+2. **hardware-independent accuracy** (`run-accuracy`): FP32 / FP16 / INT8 references,
+   accuracy of all 1,024 configurations on the validation subset, per-unit sensitivity,
+3. **T4 latency study** (`run-gpu --backend trt`): per-unit lookup table for batch 1/8/32,
+   all search methods x budgets, full-engine verification, real TensorRT test accuracy,
+4. builds the figures and zips `results/` for download.
+
+**After it finishes:** download `precisionpilot_results_t4.zip` and unzip it into the repo
+root on your Mac (it fills `results/accuracy/`, `results/t4/`, `results/figures/`,
+`results/tables/`). The accuracy files are needed by the Windows benchmark run.
+"""),
+    code("!nvidia-smi"),
+    code(SETUP),
+    code("!pip install -q \"tensorrt-cu12>=10.0,<11\""),
+    code("!python -m precisionpilot env-check"),
+    code("""
+import glob, os, shutil
+os.makedirs("checkpoints", exist_ok=True)
+found = sorted(glob.glob("/kaggle/input/**/resnet18_cifar10.pt", recursive=True))
+assert found, "Add the fine-tuning notebook output (or a dataset with the checkpoint) as input"
+shutil.copy(found[0], "checkpoints/resnet18_cifar10.pt")
+js = glob.glob(os.path.join(os.path.dirname(found[0]), "resnet18_cifar10.json"))
+if js:
+    shutil.copy(js[0], "checkpoints/")
+print("checkpoint:", found[0])
+"""),
+    code("!python -m precisionpilot make-splits"),
+    code("!python -m precisionpilot evaluate --device cuda"),
+    md("### Hardware-independent accuracy (reference, 1,024-config table, sensitivity)"),
+    code("!python -m precisionpilot run-accuracy --device cuda"),
+    md("### T4 latency study with TensorRT"),
+    code("!python -m precisionpilot run-gpu --device cuda --backend trt"),
+    code("!python -m precisionpilot report"),
+    code("""
+import shutil
+shutil.make_archive("/kaggle/working/precisionpilot_results_t4", "zip", ".", "results")
+print("download: /kaggle/working/precisionpilot_results_t4.zip")
+"""),
+])
+
+
 def main() -> None:
     OUT.mkdir(exist_ok=True)
     (OUT / "kaggle_01_finetune.ipynb").write_text(json.dumps(FINETUNE, indent=1))
-    print("wrote", OUT / "kaggle_01_finetune.ipynb")
+    (OUT / "kaggle_02_t4_benchmark.ipynb").write_text(json.dumps(BENCHMARK, indent=1))
+    print("wrote notebooks to", OUT)
 
 
 if __name__ == "__main__":

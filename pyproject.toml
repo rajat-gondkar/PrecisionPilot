@@ -22,7 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "ruff>=0.4", "httpx>=0.25"]
 demo = ["fastapi>=0.110", "uvicorn>=0.27", "python-multipart>=0.0.9", "pillow>=10.0"]
-gpu = ["tensorrt-cu12>=10.0", "cuda-python>=12.0"]
+gpu = ["tensorrt-cu12>=10.0,<11", "cuda-python>=12.0"]
 
 [project.scripts]
 precisionpilot = "precisionpilot.cli:main"
