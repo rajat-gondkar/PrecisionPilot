@@ -61,6 +61,9 @@ Each notebook clones this repository and installs it with `pip install -e .`.
 
 ```text
 python -m precisionpilot env-check        # versions + compatibility warnings
+python -m precisionpilot make-splits      # download CIFAR-10, verify data/splits.json
+python -m precisionpilot train            # fine-tune ResNet-18 (run on Kaggle GPU)
+python -m precisionpilot evaluate         # FP32 / all-FP16 baselines (needs checkpoint)
 ```
 More commands are added as the project phases land; `python -m precisionpilot --help` lists them.
 

@@ -1,5 +1,12 @@
-import pytest
-import torch
+import os
+
+for _v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+    os.environ[_v] = "2"
+
+import pytest  # noqa: E402
+import torch  # noqa: E402
+
+torch.set_num_threads(2)
 
 
 def _has_trt() -> bool:

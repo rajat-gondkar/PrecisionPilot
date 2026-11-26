@@ -24,6 +24,17 @@ def set_seed(seed: int, deterministic: bool = False) -> None:
         torch.backends.cudnn.benchmark = False
 
 
+def limit_threads(n: int = 2) -> None:
+    """Cap CPU threads used by PyTorch / OpenMP / BLAS (local smoke runs and tests)."""
+    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+        os.environ[var] = str(n)
+    torch.set_num_threads(n)
+    try:
+        torch.set_num_interop_threads(n)
+    except RuntimeError:  # can only be set once per process, before parallel work starts
+        pass
+
+
 def get_device(prefer: str | None = None) -> torch.device:
     """Pick a device: explicit preference, else cuda -> mps -> cpu."""
     if prefer and prefer != "auto":
