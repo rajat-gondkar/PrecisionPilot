@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "precisionpilot"
+version = "0.1.0"
+description = "Sensitivity-guided FP16/INT8 mixed-precision selection for GPU inference"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.1",
+  "torchvision>=0.16",
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "matplotlib>=3.7",
+  "pyyaml>=6.0",
+  "onnx>=1.15",
+  "tqdm>=4.65",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4", "ruff>=0.4", "httpx>=0.25"]
+demo = ["fastapi>=0.110", "uvicorn>=0.27", "python-multipart>=0.0.9", "pillow>=10.0"]
+gpu = ["tensorrt-cu12>=10.0", "cuda-python>=12.0"]
+
+[project.scripts]
+precisionpilot = "precisionpilot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "gpu: requires a CUDA GPU",
+  "trt: requires TensorRT",
+  "slow: slow test",
+]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501", "B008", "B905"]

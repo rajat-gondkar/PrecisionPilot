@@ -1,0 +1,4 @@
+# Install CUDA-enabled PyTorch FIRST (see README), then:
+-r base.txt
+tensorrt-cu12>=10.0
+cuda-python>=12.0

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# Data / heavy artifacts
+data/cifar-10-batches-py/
+data/*.tar.gz
+checkpoints/*.pt
+checkpoints/*.pth
+.engine_cache/
+*.engine
+*.onnx
+results/**/smoke/
+results/smoke/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.ipynb_checkpoints/

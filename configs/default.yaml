@@ -1,0 +1,51 @@
+# PrecisionPilot default configuration.
+# The accuracy budget below was FIXED before any experiment was run (outline §6.6).
+# Do not change it after seeing results.
+seed: 42
+
+paths:
+  data_dir: data
+  checkpoint: checkpoints/resnet18_cifar10.pt
+  results_dir: results
+  engine_cache: .engine_cache
+
+data:
+  image_size: 224          # CIFAR-10 upscaled to 224 (ImageNet-pretrained ResNet-18)
+  num_workers: auto        # "auto" -> safe per-OS default; or an int
+  splits_file: data/splits.json
+  n_calib: 1000            # from CIFAR train (excluded from fine-tuning)
+  n_spare: 1000            # from CIFAR train (excluded from fine-tuning)
+  n_val: 5000              # from CIFAR test: used for sensitivity scan + search
+  n_val_subset: 1000       # subset of val used for search / exhaustive table
+  n_test: 5000             # from CIFAR test: final reported numbers ONLY
+  eval_batch_size: 128
+
+train:
+  epochs: 8
+  batch_size: 128
+  lr: 0.01
+  momentum: 0.9
+  weight_decay: 0.0005
+  label_smoothing: 0.1
+  amp: true
+
+quant:
+  act_method: percentile   # "minmax" | "percentile"
+  act_percentile: 99.99
+  calib_batches: 8         # number of eval batches drawn from the calibration split
+
+budget:
+  main_pp: 1.0             # max top-1 drop vs FP32, in percentage points (validation)
+  sweep_pp: [0.5, 1.0, 2.0]
+
+latency:
+  backend: mock            # "mock" | "torch" | "trt"
+  batch_sizes: [1, 8, 32]
+  warmup: 20
+  reps: 100
+  cooldown_s: 1.0
+
+search:
+  random_seeds: 20
+  epsilon: 0.01            # floor on accuracy drop when scoring units (pp)
+  local_search: true
