@@ -13,7 +13,10 @@ SUMMARY_METHODS = ["all-fp16", "all-int8", "greedy-stop", "greedy-skip", "greedy
 def summary_table(results: pd.DataFrame) -> pd.DataFrame:
     """One row per (gpu, batch, budget, method); random aggregated over seeds."""
     r = results[results.method.isin(SUMMARY_METHODS)]
-    agg = (r.groupby(["gpu", "batch_size", "budget_pp", "method"], sort=False)
+    keys = ["gpu", "batch_size", "budget_pp"]
+    if "budget_kind" in r.columns:
+        keys.append("budget_kind")
+    agg = (r.groupby([*keys, "method"], sort=False)
              .agg(val_acc=("val_acc", "mean"), drop_pp=("drop_pp", "mean"),
                   est_latency_ms=("est_latency_ms", "mean"),
                   speedup=("speedup_vs_fp16", "mean"), gap_pct=("gap_to_opt_pct", "mean"),

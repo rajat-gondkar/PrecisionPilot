@@ -97,7 +97,7 @@ def build_lut(mm, backend, batch_sizes: Iterable[int], image_size: int = 224,
             for prec in (FP16, INT8):
                 st = backend.measure_unit(mm, i, prec, shapes[i])
                 rows.append({"gpu": backend.device_name, "backend": backend.name,
-                             "batch_size": bs, "unit": i, "name": name,
+                             "notes": backend.notes, "batch_size": bs, "unit": i, "name": name,
                              "precision": PREC_NAME[prec], "input_shape": "x".join(
                                  map(str, shapes[i])), **st.to_dict()})
                 log(f"bs={bs:<3} unit {i} {name:<9} {PREC_NAME[prec]}: "

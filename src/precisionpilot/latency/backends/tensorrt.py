@@ -87,9 +87,21 @@ class TrtEngine:
         return next(iter(self.outputs.values())).clone()
 
 
-def build_engine_bytes(onnx_path: str | Path, fp16: bool = True, int8: bool = True,
-                       workspace_mb: int = 1024) -> bytes:
+def build_engine_bytes(onnx_path: str | Path, fp16: bool = True, int8: bool | None = None,
+                       io_fp16: bool = True, workspace_mb: int = 1024) -> bytes:
+    """Build a serialized engine from ONNX.
+
+    ``int8=None`` (default) enables the INT8 builder flag only if the graph has Q/DQ nodes.
+    With the flag on but no Q/DQ nodes and no calibrator, TensorRT 10 fails with
+    "Calibration failure occurred with no scaling factors detected".
+    ``io_fp16`` makes the network inputs/outputs FP16 (linear), so a unit engine does not pay
+    FP32<->FP16 casts at its boundaries; this matches the FP16 tensors that flow between units.
+    """
+    from precisionpilot.export.onnx_export import has_qdq
+
     trt = _trt()
+    if int8 is None:
+        int8 = has_qdq(onnx_path)
     logger = trt.Logger(trt.Logger.ERROR)
     builder = trt.Builder(logger)
     flags = 0
@@ -108,6 +120,16 @@ def build_engine_bytes(onnx_path: str | Path, fp16: bool = True, int8: bool = Tr
         config.set_flag(trt.BuilderFlag.FP16)
     if int8:
         config.set_flag(trt.BuilderFlag.INT8)
+    if io_fp16 and fp16:
+        linear = 1 << int(trt.TensorFormat.LINEAR)
+        for i in range(network.num_inputs):
+            t = network.get_input(i)
+            t.dtype = trt.float16
+            t.allowed_formats = linear
+        for i in range(network.num_outputs):
+            t = network.get_output(i)
+            t.dtype = trt.float16
+            t.allowed_formats = linear
     serialized = builder.build_serialized_network(network, config)
     if serialized is None:
         raise RuntimeError(f"TensorRT engine build failed for {onnx_path}")
@@ -118,7 +140,8 @@ class TensorRTBackend(LatencyBackend):
     name = "trt"
 
     def __init__(self, warmup: int = 20, reps: int = 100, cooldown_s: float = 0.0,
-                 cache_dir: str | Path = ".engine_cache", workspace_mb: int = 1024):
+                 cache_dir: str | Path = ".engine_cache", workspace_mb: int = 1024,
+                 io_fp16: bool = True):
         super().__init__(warmup, reps, cooldown_s)
         if not torch.cuda.is_available():
             raise RuntimeError("TensorRT backend needs a CUDA GPU")
@@ -126,22 +149,45 @@ class TensorRTBackend(LatencyBackend):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.workspace_mb = workspace_mb
+        self.io_fp16 = io_fp16
+        self._io_confirmed = False   # True once one FP16-I/O build has succeeded
         self._onnx_dir = Path(tempfile.mkdtemp(prefix="pp_onnx_"))
 
     @property
     def device_name(self) -> str:
         return torch.cuda.get_device_name(0)
 
+    @property
+    def notes(self) -> str:
+        return f"trt={self.trt.__version__} io={'fp16' if self.io_fp16 else 'fp32'}"
+
     # -- engines -------------------------------------------------------------
     def _engine_for(self, onnx_path: Path) -> TrtEngine:
-        key = hashlib.sha1(onnx_path.read_bytes() + self.trt.__version__.encode()
-                           + self.device_name.encode()).hexdigest()[:20]
-        cached = self.cache_dir / f"{onnx_path.stem}_{key}.engine"
+        def cache_file() -> Path:
+            key = hashlib.sha1(onnx_path.read_bytes() + self.trt.__version__.encode()
+                               + self.device_name.encode()
+                               + f"io{int(self.io_fp16)}".encode()).hexdigest()[:20]
+            return self.cache_dir / f"{onnx_path.stem}_{key}.engine"
+
+        cached = cache_file()
         if cached.exists():
-            data = cached.read_bytes()
+            return TrtEngine(cached.read_bytes())
+        try:
+            data = build_engine_bytes(onnx_path, io_fp16=self.io_fp16,
+                                      workspace_mb=self.workspace_mb)
+        except RuntimeError:
+            if not self.io_fp16 or self._io_confirmed:
+                raise
+            # First build ever and FP16 I/O was rejected: use FP32 I/O for the whole run
+            # (consistently), and say so (recorded in the LUT's `notes` column).
+            print("[trt] FP16 network I/O not accepted; falling back to FP32 I/O "
+                  "(unit latencies will include boundary casts)")
+            self.io_fp16 = False
+            cached = cache_file()
+            data = build_engine_bytes(onnx_path, io_fp16=False, workspace_mb=self.workspace_mb)
         else:
-            data = build_engine_bytes(onnx_path, workspace_mb=self.workspace_mb)
-            cached.write_bytes(data)
+            self._io_confirmed = True
+        cached.write_bytes(data)
         return TrtEngine(data)
 
     def engine_for_config(self, mm, cfg, batch_size, image_size) -> TrtEngine:

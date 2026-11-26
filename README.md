@@ -68,6 +68,7 @@ python -m precisionpilot run-accuracy     # reference accs, 1,024-config table, 
 python -m precisionpilot build-lut        # per-unit latency table on this GPU
 python -m precisionpilot run-gpu          # LUT + all searches + verification + final test
 python -m precisionpilot report           # regenerate figures and tables from results/
+                                          # (budgets: configs/default.yaml -> budget.*)
 python -m precisionpilot pipeline --smoke # end-to-end check on synthetic data (~20 s)
 python -m precisionpilot export-onnx --cfg-bits 0111111110   # one config -> ONNX (Q/DQ)
 python -m precisionpilot demo             # web demo on http://127.0.0.1:8000

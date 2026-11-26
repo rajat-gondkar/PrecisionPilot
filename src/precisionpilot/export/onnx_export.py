@@ -8,6 +8,7 @@ per-unit precisions (TensorRT *explicit quantization*).
 
 from __future__ import annotations
 
+import copy
 import warnings
 from collections.abc import Sequence
 from pathlib import Path
@@ -31,7 +32,9 @@ class _UnitWrapper(nn.Module):
 
 def _export(module: nn.Module, example: torch.Tensor, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    module = module.eval().cpu()
+    # Export a COPY on the CPU: `.cpu()` moves modules in place, which would pull the live
+    # (GPU-resident) units off the GPU and break every later measurement / evaluation.
+    module = copy.deepcopy(module).eval().cpu()
     example = example.cpu().float()
     with warnings.catch_warnings(), torch.no_grad():
         warnings.simplefilter("ignore")
@@ -70,3 +73,11 @@ def count_qdq(path: str | Path) -> dict[str, int]:
     return {"QuantizeLinear": ops.count("QuantizeLinear"),
             "DequantizeLinear": ops.count("DequantizeLinear"),
             "Conv": ops.count("Conv"), "Gemm": ops.count("Gemm") + ops.count("MatMul")}
+
+
+def has_qdq(path: str | Path) -> bool:
+    """True if the ONNX graph contains any Q/DQ node (i.e. needs the TensorRT INT8 flag)."""
+    import onnx
+
+    ops = {n.op_type for n in onnx.load(str(path)).graph.node}
+    return "QuantizeLinear" in ops or "DequantizeLinear" in ops

@@ -56,6 +56,7 @@ class QuantCfg:
 class BudgetCfg:
     main_pp: float = 1.0
     sweep_pp: list = field(default_factory=lambda: [0.5, 1.0, 2.0])
+    extra_pp: list = field(default_factory=lambda: [0.1, 0.2, 0.3])
 
 
 @dataclass

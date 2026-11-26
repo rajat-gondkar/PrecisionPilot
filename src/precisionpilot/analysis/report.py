@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import pandas as pd
@@ -16,7 +17,9 @@ def _gpu_dirs(results: Path) -> list[Path]:
     return sorted(p.parent for p in results.glob("*/search_results.csv"))
 
 
-def build_report(results: Path, main_budget: float, log=print) -> list[Path]:
+def build_report(results: Path, main_budget: float, log=print,
+                 extra_budgets: Sequence[float] = ()) -> list[Path]:
+    """Figures for the main budget plus every supplementary budget (``extra_budgets``)."""
     results = Path(results)
     figs = ensure_dir(results / "figures")
     tabs = ensure_dir(results / "tables")
@@ -43,13 +46,17 @@ def build_report(results: Path, main_budget: float, log=print) -> list[Path]:
         all_results.append(res)
         curve = pd.read_csv(gdir / "random_curve.csv")
         lut = LatencyTable.load(gdir / "lut.csv")
+        present = set(res.budget_pp.round(6))
+        budgets = [b for b in dict.fromkeys([main_budget, *extra_budgets])
+                   if round(b, 6) in present]
         for bs in sorted(res.batch_size.unique()):
-            out.append(plots.plot_cost_vs_quality(
-                res, curve, figs / f"fig2_cost_vs_quality_{gpu}_bs{bs}.png", bs, main_budget))
-            if acc_table is not None and "fp32_val_subset" in ref:
-                out.append(plots.plot_scatter(
-                    acc_table, lut.latency_fn(bs), ref["fp32_val_subset"], res,
-                    figs / f"fig3_acc_vs_latency_{gpu}_bs{bs}.png", bs, main_budget))
+            for b in budgets:
+                out.append(plots.plot_cost_vs_quality(
+                    res, curve, figs / f"fig2_cost_vs_quality_{gpu}_bs{bs}_b{b:g}.png", bs, b))
+                if acc_table is not None and "fp32_val_subset" in ref:
+                    out.append(plots.plot_scatter(
+                        acc_table, lut.latency_fn(bs), ref["fp32_val_subset"], res,
+                        figs / f"fig3_acc_vs_latency_{gpu}_bs{bs}_b{b:g}.png", bs, b))
         out.append(plots.plot_config_heatmap(res, figs / f"fig4_heatmap_{gpu}.png",
                                              title=f"Greedy selection per batch / budget — {gpu}"))
         out.append(plots.plot_config_heatmap(res, figs / f"fig4_heatmap_optimum_{gpu}.png",
@@ -63,6 +70,9 @@ def build_report(results: Path, main_budget: float, log=print) -> list[Path]:
     if all_results:
         res = pd.concat(all_results, ignore_index=True)
         out.append(plots.plot_speedups(res, figs / "fig6_speedups.png", main_budget))
+        for b in extra_budgets:
+            if round(b, 6) in set(res.budget_pp.round(6)) and b != main_budget:
+                out.append(plots.plot_speedups(res, figs / f"fig6_speedups_b{b:g}.png", b))
         if res.gpu.nunique() > 1:
             main = res[res.budget_pp == main_budget]
             out.append(plots.plot_config_heatmap(main, figs / "fig5_heatmap_gpus.png",

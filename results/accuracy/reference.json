@@ -1,0 +1,17 @@
+{
+  "fp32_val_subset": 96.5,
+  "fp16_val_subset": 96.5,
+  "int8_val_subset": 96.2,
+  "n_val_subset": 1000,
+  "fp32_val": 95.86,
+  "fp16_val": 95.88,
+  "int8_val": 95.67999999999999,
+  "n_val": 5000,
+  "fp32_test": 96.48,
+  "fp16_test": 96.48,
+  "int8_test": 96.64,
+  "n_test": 5000,
+  "sec_per_eval": 1.039098878666664,
+  "device": "cuda",
+  "budget_reference": "fp32_val_subset"
+}

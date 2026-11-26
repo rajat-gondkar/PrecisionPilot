@@ -77,13 +77,19 @@ def run_search_suite(acc_table: TableAccuracy, reference_acc: float, lut: Latenc
                      gpu: str, batch_sizes: Sequence[int], budgets: Sequence[float],
                      random_seeds: int = 20, epsilon: float = 0.01,
                      sec_per_eval: float = 0.0, n_units: int = 10,
-                     log=print) -> tuple[pd.DataFrame, pd.DataFrame]:
+                     log=print, supplementary: Sequence[float] = ()
+                     ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """``supplementary`` budgets are tagged ``budget_kind="supplementary"`` (post-hoc additions);
+    all others are ``"pre-registered"``."""
     rows, curve_rows = [], []
     for bs in batch_sizes:
         lat = lut.latency_fn(bs)
         for budget in budgets:
             r, c = _run_cell(acc_table, reference_acc, lat, gpu, bs, budget, random_seeds,
                              epsilon, sec_per_eval, n_units, log)
+            kind = "supplementary" if budget in set(supplementary) else "pre-registered"
+            for d in (*r, *c):
+                d["budget_kind"] = kind
             rows += r
             curve_rows += c
     return pd.DataFrame(rows), pd.DataFrame(curve_rows)

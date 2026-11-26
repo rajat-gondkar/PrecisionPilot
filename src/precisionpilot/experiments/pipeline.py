@@ -66,10 +66,12 @@ def run_gpu(ws, backend, gpu: str | None = None, skip_lut: bool = False,
 
     ref = acc_exp.load_reference(ws)
     table = TableAccuracy.from_csv(ws.accuracy_dir / "accuracy_table.csv")
+    registered = list(cfg.budget.sweep_pp)
+    supplementary = [b for b in cfg.budget.extra_pp if b not in registered]
     results, curve = run_search_suite(table, ref["fp32_val_subset"], lut, gpu, bss,
-                                      list(cfg.budget.sweep_pp), cfg.search.random_seeds,
+                                      sorted(registered + supplementary), cfg.search.random_seeds,
                                       cfg.search.epsilon, ref.get("sec_per_eval", 0.0),
-                                      ws.mm.n_units, log)
+                                      ws.mm.n_units, log, supplementary=supplementary)
     results.to_csv(gdir / "search_results.csv", index=False)
     curve.to_csv(gdir / "random_curve.csv", index=False)
     log(f"saved {gdir / 'search_results.csv'}")
@@ -104,14 +106,15 @@ def smoke(cfg_overrides: list[str] | None = None, log=print, threads: int = 2) -
     limit_threads(threads)
     overrides = ["paths.results_dir=results/smoke", "data.image_size=16",
                  "data.eval_batch_size=64", "latency.reps=10", "search.random_seeds=3",
-                 "latency.batch_sizes=[1,32]", "quant.calib_batches=1",
+                 "latency.batch_sizes=[1,32]", "quant.calib_batches=1", "budget.extra_pp=[0.2]",
                  *(cfg_overrides or [])]
     cfg = load_config(overrides=overrides)
     ws = make_workspace(cfg, "cpu", fake=True, fake_size="tiny")
     run_accuracy(ws, log)
     for profile in ("mock-ampere", "mock-turing"):
         run_gpu(ws, make_backend(cfg, "mock", profile=profile), log=log)
-    figs = build_report(ws.results, cfg.budget.main_pp, log)
+    figs = build_report(ws.results, cfg.budget.main_pp, log,
+                        extra_budgets=cfg.budget.extra_pp)
     log(f"smoke pipeline OK: {len(figs)} figures in {ws.results / 'figures'}")
     return figs
 

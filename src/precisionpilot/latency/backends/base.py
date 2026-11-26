@@ -15,6 +15,7 @@ class LatencyBackend(ABC):
     """
 
     name: str = "base"
+    notes: str = ""   # free-text backend details recorded in the LUT (library version, I/O mode)
 
     def __init__(self, warmup: int = 20, reps: int = 100, cooldown_s: float = 0.0):
         self.warmup = warmup

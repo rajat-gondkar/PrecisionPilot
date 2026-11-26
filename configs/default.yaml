@@ -36,7 +36,10 @@ quant:
 
 budget:
   main_pp: 1.0             # max top-1 drop vs FP32, in percentage points (validation)
-  sweep_pp: [0.5, 1.0, 2.0]
+  sweep_pp: [0.5, 1.0, 2.0]   # pre-registered sweep
+  # SUPPLEMENTARY budgets, added AFTER seeing that every config is feasible at >= 1 pp (the
+  # accuracy constraint never binds there). Reported separately, never replaces the above.
+  extra_pp: [0.1, 0.2, 0.3]
 
 latency:
   backend: mock            # "mock" | "torch" | "trt"

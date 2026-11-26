@@ -197,7 +197,16 @@ per-unit precisions (*explicit quantization*, the TensorRT 10 path).
   cooldown between measurements.
 - **Backends:**
   - `trt`: TensorRT 10. Engines are built from the ONNX exports and cached in
-    `.engine_cache/`, with buffers allocated by PyTorch.
+    `.engine_cache/`, with buffers allocated by PyTorch. Build details that matter:
+    - The FP16 builder flag is always on. The **INT8 flag is set only when the graph contains
+      Q/DQ nodes**: with the flag on but no Q/DQ nodes and no calibrator, TensorRT 10 refuses to
+      build ("Calibration failure occurred with no scaling factors detected"). This was found
+      on the first Kaggle run and fixed.
+    - Engine inputs and outputs are **FP16 (linear)**, matching the FP16 tensors that flow
+      between units in the simulation, so a unit engine does not pay FP32↔FP16 casts at its
+      boundaries (which would inflate the summed per-unit latencies). If TensorRT rejects FP16
+      I/O on the very first build, the backend falls back to FP32 I/O for the whole run and
+      records it in the lookup table's `notes` column (`trt=<version> io=fp16|fp32`).
   - `torch`: CUDA FP16 sanity check. Its INT8 timings are only the simulation and are never
     reported as INT8 latency.
   - `mock`: deterministic analytic model for machines without CUDA, with Ampere-like and
@@ -245,11 +254,20 @@ into selection.
 | Rule | Value | Where |
 |---|---|---|
 | Main accuracy budget | **1.0 percentage point** top-1 drop vs FP32, on the validation split | `configs/default.yaml → budget.main_pp` |
-| Budget sweep | 0.5, 1.0, 2.0 pp | `budget.sweep_pp` |
+| Budget sweep (pre-registered) | 0.5, 1.0, 2.0 pp | `budget.sweep_pp` |
+| Supplementary budgets (**post-hoc**) | 0.1, 0.2, 0.3 pp | `budget.extra_pp` |
 | Batch sizes | 1, 8, 32 | `latency.batch_sizes` |
 | Timing | 20 warm-up runs, 100 timed runs, median + p95 reported, 1 s cooldown | `latency.*` |
 | Random seed | 42 | `seed` |
 | Selection data | validation split only; the test split is used only for final reporting | — |
+
+**Why there are supplementary budgets.** The pre-registered budgets and the main budget were set
+before any result existed and are unchanged. After the first accuracy run showed that *every*
+configuration is within budget at 1 pp and 2 pp (§7.6), the accuracy constraint cannot influence
+the choice there. Three tighter budgets (0.1, 0.2, 0.3 pp) were therefore **added afterwards**, so
+the constrained search can actually be tested. They are tagged `budget_kind = supplementary` in
+every results table and are always reported separately from the pre-registered ones; nothing
+pre-registered was removed or changed.
 
 ### 6.2 Data splits
 The splits are stratified by class, use seed 42, and are stored in `data/splits.json`, which
@@ -302,7 +320,8 @@ accuracy stage that runs once and a latency stage that runs on every GPU:
 - The searches make exactly the same decisions they would make running the model live.
 
 **Search suite (Experiments 2–5).**
-- For each GPU × batch size {1, 8, 32} × budget {0.5, 1, 2} pp, the suite runs: all-FP16,
+- For each GPU × batch size {1, 8, 32} × budget {0.5, 1, 2 pp pre-registered; 0.1, 0.2, 0.3 pp
+  supplementary}, the suite runs: all-FP16,
   all-INT8, greedy-skip, greedy-stop, greedy-skip + local search, random search (20 seeds,
   each with the same number of evaluations as greedy-skip), and exhaustive search.
 - It records the configuration, validation accuracy, drop vs FP32, estimated latency, speedup
@@ -323,12 +342,14 @@ accuracy stage that runs once and a latency stage that runs on every GPU:
 | Figure | File | Shows |
 |---|---|---|
 | 1 | `fig1_sensitivity.png` | Accuracy drop per unit when only that unit is INT8 |
-| 2 | `fig2_cost_vs_quality_<gpu>_bs<b>.png` | **Main result:** latency gap to optimum vs number of evaluations; random curve (mean ± std) vs greedy variants vs exhaustive |
-| 3 | `fig3_acc_vs_latency_<gpu>_bs<b>.png` | All 1,024 configurations, the budget line, baselines and the chosen configurations |
+| 2 | `fig2_cost_vs_quality_<gpu>_bs<b>_b<budget>.png` | **Main result:** latency gap to optimum vs number of evaluations; random curve (mean ± std) vs greedy variants vs exhaustive |
+| 3 | `fig3_acc_vs_latency_<gpu>_bs<b>_b<budget>.png` | All 1,024 configurations, the budget line, baselines and the chosen configurations |
 | 4 | `fig4_heatmap_<gpu>.png`, `fig4_heatmap_optimum_<gpu>.png` | INT8 vs FP16 per unit, for every batch size × budget (greedy and optimum) |
 | 5 | `fig5_heatmap_gpus.png` | Greedy selections side by side across GPUs |
-| 6 | `fig6_speedups.png` | Estimated speedup over all-FP16 by batch size and GPU |
+| 6 | `fig6_speedups.png`, `fig6_speedups_b<budget>.png` | Estimated speedup over all-FP16 by batch size and GPU (main budget, and one per supplementary budget) |
 | 7 | `fig7_lut_error.png` | Lookup-table estimate vs measured latency |
+
+Figures 2, 3 and 6 are produced for the main budget and for every supplementary budget.
 
 Tables: `summary.md/csv` (every method × GPU × batch × budget, with random search averaged
 over seeds), `sensitivity.md`, `verify.md`, `final_test.md`.
@@ -374,6 +395,46 @@ is in `checkpoints/resnet18_cifar10.json`.
 The target of at least 95% is met. All-FP16 matches FP32 to within ±0.02 pp, so FP16 is a
 safe reference precision and the accuracy budget is effectively spent on INT8 alone.
 Source: `results/baselines/baselines_t4.json`.
+
+### 7.6 Result: INT8 accuracy on the Tesla T4 (Experiment 1 and the exhaustive table)
+Source: `results/accuracy/` from the first Kaggle benchmark run (`run-accuracy`, 177 s).
+
+| Precision | val_subset (n=1,000) | val (n=5,000) | test (n=5,000) |
+|---|---|---|---|
+| FP32 | 96.50 | 95.86 | 96.48 |
+| all-FP16 | 96.50 | 95.88 | 96.48 |
+| all-INT8 (simulated) | 96.20 | 95.68 | 96.64 |
+
+**Per-unit sensitivity** (full validation split, one unit INT8, rest FP16, drop vs all-FP16):
+
+| Unit | stem | layer1.0 | layer1.1 | layer2.0 | layer2.1 | layer3.0 | layer3.1 | layer4.0 | layer4.1 | head |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Drop (pp) | +0.06 | +0.12 | −0.02 | +0.04 | +0.02 | 0.00 | +0.04 | −0.04 | +0.04 | 0.00 |
+
+**Findings so far (accuracy side only, latency pending):**
+- INT8 is almost free for this model. Every single-unit drop is at most 0.12 pp, and all-INT8 loses
+  0.30 pp on `val_subset` (0.18 pp on `val`) and *gains* 0.16 pp on `test`.
+- The usual expectation that the first and last units are the fragile ones is **not** observed
+  here: the stem and head drops are 0.06 pp and 0.00 pp. With percentile-calibrated
+  per-channel PTQ, ResNet-18 on CIFAR-10 is robust at every unit.
+- The accuracy budget barely binds. Configurations within budget out of 1,024:
+
+  | Budget (pp) | 0 | 0.1 | 0.2 | 0.3 | **0.5** | **1.0** | **2.0** |
+  |---|---|---|---|---|---|---|---|
+  | Feasible configs | 351 | 527 | 635 | 837 | 1,009 | 1,024 | 1,024 |
+
+  At the pre-registered budgets of 1 pp and 2 pp **every** configuration is feasible, so the
+  optimum there is simply the lowest-latency configuration and accuracy plays no role. Only 0.5 pp
+  excludes anything (15 configurations). This is why the supplementary budgets were added (§6.1).
+- The noise floor is high. On `val_subset` one image is 0.1 pp, and the standard error of a
+  1,000-image accuracy near 96.5% is about 0.6 pp. Differences between configurations of a few
+  tenths of a point are therefore within sampling noise, which is also why some configurations
+  score *above* FP32.
+
+Implication for the study: the sensitivity-guided method should still reach the same latency as
+the exhaustive optimum cheaply, but the accuracy-constrained part of the claim can only be
+tested at budgets of 0.3 pp and below. This is reported as a finding; the pre-registered budgets
+are unchanged and the tighter ones are added separately and labelled (§6.1).
 
 The whole chain is checked end to end by `python -m precisionpilot pipeline --smoke`. That run
 uses synthetic data, random weights and two mock GPU profiles; its numbers only show that the
@@ -444,6 +505,7 @@ See [README.md](README.md) for environment setup on macOS, Windows and Kaggle. A
 | `tests/test_sensitivity.py` | distinct-evaluation counting, sensitivity scan cost (N+1) and drops, scoring order, exclusion of units that are slower in INT8 |
 | `tests/test_latency.py` | timing statistics, mock backend determinism and profiles, LUT build / estimate / save / load, verification error; `gpu`/`trt`-marked real-hardware tests (TensorRT engine build, engine cache, TRT vs simulated accuracy) |
 | `tests/test_experiments.py` | prefix-tree exhaustive table equals direct per-config evaluation; search suite invariants (exhaustive gap 0, nothing beats the optimum, search-time accounting, random curve); chosen configs; summary table; end-to-end smoke pipeline (all result files + figures); CLI |
+| `tests/test_quant.py` (export) | also: the exporter never moves the live GPU-resident modules to the CPU (regression test for a bug that would have broken the second batch size of the GPU run); the TensorRT INT8 flag is set exactly when the graph has Q/DQ nodes |
 | `tests/test_demo.py` | page and static files; `/api/meta`; selection at arbitrary budgets (optimum costs 1,024 evaluations, greedy feasible and never better than the optimum, budget 0 gives no accuracy loss); input validation (unknown GPU or batch size, out-of-range budget, malformed config); sample and uploaded-image prediction; unreadable upload; not-ready state |
 | `tests/test_search.py` | 25 random synthetic problems with interacting units: greedy is always feasible, exhaustive equals brute force, local search never makes things worse; greedy optimal on additive problems; skip vs stop; fallbacks; random-search reproducibility and evaluation budget; neighbourhood; gap and Pareto front |
 

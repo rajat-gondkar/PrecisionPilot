@@ -43,8 +43,12 @@ def test_prefix_tree_table_matches_direct_evaluation(ws, table):
 def test_search_suite_and_chosen_configs(ws, table):
     lut = build_lut(ws.mm, MockBackend(reps=5), [1, 8], 16, log=lambda *_: None)
     res, curve = run_search_suite(TableAccuracy(dict(zip(table.config, table.val_acc))),
-                                  float(table.val_acc.max()), lut, "mock", [1, 8], [1.0, 2.0],
-                                  random_seeds=2, sec_per_eval=0.5, log=lambda *_: None)
+                                  float(table.val_acc.max()), lut, "mock", [1, 8], [0.2, 1.0],
+                                  random_seeds=2, sec_per_eval=0.5, log=lambda *_: None,
+                                  supplementary=[0.2])
+    kinds = res.groupby("budget_pp").budget_kind.unique().map(list).to_dict()
+    assert kinds == {0.2: ["supplementary"], 1.0: ["pre-registered"]}
+    assert set(curve.budget_kind) == {"supplementary", "pre-registered"}
     methods = set(res.method)
     assert {"all-fp16", "all-int8", "greedy-skip", "greedy-stop", "greedy-skip+ls",
             "random", "exhaustive"} <= methods
@@ -63,6 +67,7 @@ def test_search_suite_and_chosen_configs(ws, table):
 
     summ = summary_table(res)
     assert len(summ) == 2 * 2 * 7  # bs x budget x methods (random aggregated)
+    assert set(summ.budget_kind) == {"supplementary", "pre-registered"}
     assert (summ[summ.method == "random"].config == "(varies)").all()
     md = to_markdown(summ.head(3))
     assert md.count("\n") == 5 and "|" in md

@@ -182,9 +182,14 @@ def test_quant_unit_is_independent_copy(mixed):
 # ---------------------------------------------------------------- ONNX export
 def test_onnx_qdq_only_in_int8_units(mixed, tmp_path):
     pytest.importorskip("onnx")
-    from precisionpilot.export.onnx_export import count_qdq, export_config, export_unit
+    from precisionpilot.export.onnx_export import count_qdq, export_config, export_unit, has_qdq
 
     _, mm, _, _ = mixed
+    # TensorRT INT8 flag must be set exactly when Q/DQ nodes exist (see tensorrt.py)
+    assert not has_qdq(export_config(mm, all_fp16(), 1, 64, tmp_path))
+    assert has_qdq(export_config(mm, one_hot(9), 1, 64, tmp_path))
+    assert not has_qdq(export_unit(mm, 3, 0, (1, 64, 16, 16), tmp_path))
+    assert has_qdq(export_unit(mm, 3, INT8, (1, 64, 16, 16), tmp_path))
     c0 = count_qdq(export_config(mm, all_fp16(), 1, 64, tmp_path))
     assert c0["QuantizeLinear"] == 0 and c0["Conv"] == 20
     c1 = count_qdq(export_config(mm, one_hot(0), 1, 64, tmp_path))
@@ -219,3 +224,26 @@ def test_manual_fake_quant_matches_native():
     native_w = torch.fake_quantize_per_channel_affine(
         w, scale, torch.zeros(8, dtype=torch.int32), 0, QMIN, QMAX)
     assert torch.allclose(_manual_fake_quant(w, scale.view(-1, 1, 1, 1)), native_w, atol=1e-7)
+
+
+def test_export_never_moves_the_live_modules(mixed, tmp_path, monkeypatch):
+    """Regression: exporting must not call .cpu() on modules shared with the live model
+    (it silently moved GPU-resident units to the CPU and broke the next GPU measurement)."""
+    pytest.importorskip("onnx")
+    from precisionpilot.export.onnx_export import export_config, export_unit
+
+    _, mm, _, _ = mixed
+    live = {id(m) for m in mm.modules()}
+    moved = []
+    orig = torch.nn.Module.cpu
+
+    def spy(self):
+        moved.append(self)
+        return orig(self)
+
+    monkeypatch.setattr(torch.nn.Module, "cpu", spy)
+    export_unit(mm, 3, INT8, (1, 64, 16, 16), tmp_path)
+    export_config(mm, one_hot(2), 1, 64, tmp_path)
+    assert moved, "expected the exporter to move its copy to the CPU"
+    for top in moved:
+        assert not any(id(m) in live for m in top.modules())

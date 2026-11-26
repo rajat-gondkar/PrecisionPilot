@@ -180,7 +180,8 @@ def cmd_report(args) -> int:
     from precisionpilot.analysis.report import build_report
 
     cfg = _cfg(args)
-    figs = build_report(cfg.path("results_dir"), cfg.budget.main_pp)
+    figs = build_report(cfg.path("results_dir"), cfg.budget.main_pp,
+                        extra_budgets=cfg.budget.extra_pp)
     print(f"{len(figs)} figures")
     return 0
 
