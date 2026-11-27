@@ -111,7 +111,9 @@ def test_tensorrt_unit_and_config(mm, tmp_path):
     b = get_backend("trt", warmup=2, reps=5, cache_dir=tmp_path)
     assert b.measure_unit(mm, 1, INT8, (2, 64, 16, 16)).median_ms > 0
     assert b.measure_config(mm, one_hot(0), 2, 64).median_ms > 0
-    assert b.model_info(mm, all_int8(), 2, 64)["engine_mb"] > 0
+    info = b.model_info(mm, all_int8(), 2, 64)
+    assert info["engine_mb"] > 0 and info["gpu_footprint_mb"] > 0
+    assert info["engine_mb"] < b.model_info(mm, all_fp16(), 2, 64)["engine_mb"]
     assert list(tmp_path.glob("*.engine"))  # engine cache populated
 
 

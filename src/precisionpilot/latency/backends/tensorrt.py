@@ -163,6 +163,9 @@ class TensorRTBackend(LatencyBackend):
 
     # -- engines -------------------------------------------------------------
     def _engine_for(self, onnx_path: Path) -> TrtEngine:
+        return TrtEngine(self._engine_bytes(onnx_path))
+
+    def _engine_bytes(self, onnx_path: Path) -> bytes:
         def cache_file() -> Path:
             key = hashlib.sha1(onnx_path.read_bytes() + self.trt.__version__.encode()
                                + self.device_name.encode()
@@ -171,7 +174,7 @@ class TensorRTBackend(LatencyBackend):
 
         cached = cache_file()
         if cached.exists():
-            return TrtEngine(cached.read_bytes())
+            return cached.read_bytes()
         try:
             data = build_engine_bytes(onnx_path, io_fp16=self.io_fp16,
                                       workspace_mb=self.workspace_mb)
@@ -188,12 +191,15 @@ class TensorRTBackend(LatencyBackend):
         else:
             self._io_confirmed = True
         cached.write_bytes(data)
-        return TrtEngine(data)
+        return data
 
     def engine_for_config(self, mm, cfg, batch_size, image_size) -> TrtEngine:
+        return TrtEngine(self.engine_bytes_for_config(mm, cfg, batch_size, image_size))
+
+    def engine_bytes_for_config(self, mm, cfg, batch_size, image_size) -> bytes:
         from precisionpilot.export.onnx_export import export_config
 
-        return self._engine_for(export_config(mm, cfg, batch_size, image_size, self._onnx_dir))
+        return self._engine_bytes(export_config(mm, cfg, batch_size, image_size, self._onnx_dir))
 
     def engine_for_unit(self, mm, index, precision, input_shape) -> TrtEngine:
         from precisionpilot.export.onnx_export import export_unit
@@ -216,9 +222,37 @@ class TensorRTBackend(LatencyBackend):
         return self._time(self.engine_for_config(mm, cfg, batch_size, image_size))
 
     def model_info(self, mm, cfg, batch_size, image_size) -> dict:
-        eng = self.engine_for_config(mm, cfg, batch_size, image_size)
-        return {"engine_mb": eng.size_bytes / 1e6,
-                "activation_memory_mb": eng.device_memory_bytes / 1e6}
+        """Memory metrics of the full-model engine for ``cfg``.
+
+        * ``engine_mb``: serialized engine size (weights + engine metadata),
+        * ``activation_memory_mb``: TensorRT's per-context scratch memory for activations,
+        * ``gpu_footprint_mb``: measured drop in free GPU memory after deserializing the engine,
+          creating its context, allocating the I/O buffers and running it once (i.e. what the
+          model actually occupies on the device, on top of the CUDA context).
+        """
+        data = self.engine_bytes_for_config(mm, cfg, batch_size, image_size)
+        footprint, eng_info = self._footprint(data)
+        return {"engine_mb": len(data) / 1e6,
+                "activation_memory_mb": eng_info["activation"] / 1e6,
+                "gpu_footprint_mb": footprint / 1e6}
+
+    @staticmethod
+    def _footprint(data: bytes) -> tuple[int, dict]:
+        import gc
+
+        gc.collect()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        free0, _ = torch.cuda.mem_get_info()
+        eng = TrtEngine(data)
+        eng.run()
+        torch.cuda.synchronize()
+        free1, _ = torch.cuda.mem_get_info()
+        info = {"activation": eng.device_memory_bytes}
+        del eng
+        gc.collect()
+        torch.cuda.empty_cache()
+        return max(0, free0 - free1), info
 
     # -- real accuracy -------------------------------------------------------
     @torch.inference_mode()

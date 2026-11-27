@@ -51,7 +51,7 @@ def test_search_suite_and_chosen_configs(ws, table):
     assert set(curve.budget_kind) == {"supplementary", "pre-registered"}
     methods = set(res.method)
     assert {"all-fp16", "all-int8", "greedy-skip", "greedy-stop", "greedy-skip+ls",
-            "random", "exhaustive"} <= methods
+            "greedy-dyn", "random", "exhaustive"} <= methods
     ex = res[res.method == "exhaustive"]
     assert (ex.gap_to_opt_pct.abs() < 1e-9).all() and (ex.n_evals == 1024).all()
     feas = res[res.feasible & res.method.isin(["greedy-skip", "greedy-skip+ls", "random"])]
@@ -66,7 +66,7 @@ def test_search_suite_and_chosen_configs(ws, table):
     assert cfg_to_str(all_fp16()) in configs and cfg_to_str(all_int8()) in configs
 
     summ = summary_table(res)
-    assert len(summ) == 2 * 2 * 7  # bs x budget x methods (random aggregated)
+    assert len(summ) == 2 * 2 * 8  # bs x budget x methods (random aggregated)
     assert set(summ.budget_kind) == {"supplementary", "pre-registered"}
     assert (summ[summ.method == "random"].config == "(varies)").all()
     md = to_markdown(summ.head(3))
@@ -79,12 +79,47 @@ def test_smoke_pipeline_end_to_end(smoke_results):
     for f in ["accuracy/reference.json", "accuracy/accuracy_table.csv",
               "accuracy/sensitivity.csv", "accuracy/final_test.csv",
               "mockampere/lut.csv", "mockampere/search_results.csv",
-              "mockturing/verify.csv", "tables/summary.md", "figures/fig5_heatmap_gpus.png"]:
+              "mockturing/verify.csv", "tables/summary.md", "figures/fig5_heatmap_gpus.png",
+              "mockampere/ctx_train.csv", "mockampere/ctx_model.csv",
+              "tables/memory.md", "tables/latency_model_error.md", "tables/latency_model_comparison.md",
+              "figures/fig8_memory_mockampere.png", "figures/fig9_latency_models_mockampere.png"]:
         assert (tmp_path / f).exists(), f
     res = pd.read_csv(tmp_path / "mockampere" / "search_results.csv", dtype={"config": str})
     assert res.config.str.len().eq(10).all()
+    assert set(res.latency_model) == {"additive", "context"}
+    assert "greedy-dyn" in set(res.method) and res.model_mb.notna().all()
+    mem = pd.read_csv(tmp_path / "tables" / "memory.csv")
+    assert (mem[mem.name == "all-INT8"].model_mb_saving_pct.round() == 50).all()
     assert torch.get_num_threads() == 2
 
 
 def test_cli_pipeline_requires_smoke_flag():
     assert main(["pipeline"]) == 1
+
+
+def test_report_tolerates_results_from_before_context_model_and_sizes(smoke_results, tmp_path):
+    """Result files produced by older versions (no latency_model / model_mb / ctx columns)
+    must still produce a report instead of crashing."""
+    import shutil
+
+    from precisionpilot.analysis.report import build_report
+
+    src, _ = smoke_results
+    old = tmp_path / "old"
+    shutil.copytree(src, old, ignore=shutil.ignore_patterns("figures", "tables"))
+    for gdir in old.glob("mock*"):
+        res = pd.read_csv(gdir / "search_results.csv", dtype={"config": str})
+        res = res[res.latency_model == "additive"].drop(columns=["latency_model", "model_mb",
+                                                                 "size_saving_pct"])
+        res.to_csv(gdir / "search_results.csv", index=False)
+        curve = pd.read_csv(gdir / "random_curve.csv")
+        curve[curve.latency_model == "additive"].drop(columns="latency_model").to_csv(
+            gdir / "random_curve.csv", index=False)
+        ver = pd.read_csv(gdir / "verify.csv", dtype={"config": str})
+        ver.drop(columns=[c for c in ver.columns if c.startswith("ctx_")]).to_csv(
+            gdir / "verify.csv", index=False)
+        (gdir / "ctx_model.csv").unlink()
+        lut = pd.read_csv(gdir / "lut.csv")
+        lut.drop(columns=["params"]).to_csv(gdir / "lut.csv", index=False)
+    figs = build_report(old, 1.0, log=lambda *_: None, extra_budgets=[0.2])
+    assert len(figs) >= 8

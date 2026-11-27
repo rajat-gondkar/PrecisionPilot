@@ -2,7 +2,7 @@
 "use strict";
 
 const $ = (sel) => document.querySelector(sel);
-const state = { meta: null, gpu: null, bs: null, budget: 1.0, selection: null, sample: null };
+const state = { meta: null, gpu: null, bs: null, budget: 1.0, model: null, selection: null, sample: null };
 const METHOD_LABEL = {
   greedy: "Sensitivity-guided greedy",
   optimum: "Exhaustive optimum",
@@ -17,6 +17,7 @@ const fmt = {
   signed: (v) => (Math.abs(v) < 0.005 ? "0.00" : (v < 0 ? "−" : "+") + Math.abs(v).toFixed(2)),
   x: (v) => v.toFixed(2) + "×",
   pct: (v) => (v * 100).toFixed(1) + "%",
+  mb: (v) => (v >= 100 ? v.toFixed(0) : v.toFixed(1)) + " MB",
 };
 
 async function api(path, opts) {
@@ -69,9 +70,26 @@ function renderControls() {
   segmented($("#gpu-options"), gpus.map((g) => ({ value: g.id, label: g.label })), state.gpu, (v) => {
     state.gpu = v;
     renderBatchOptions();
+    renderModelOptions();
     refresh();
   });
   renderBatchOptions();
+  renderModelOptions();
+}
+
+function renderModelOptions() {
+  const gpu = state.meta.gpus.find((g) => g.id === state.gpu);
+  const ctl = $("#model-control");
+  ctl.hidden = !gpu.has_context_model;
+  state.model = gpu.has_context_model ? (state.model || "context") : "additive";
+  if (!gpu.has_context_model) return;
+  segmented($("#model-options"), [
+    { value: "context", label: "Context-aware" },
+    { value: "additive", label: "Additive table" },
+  ], state.model, (v) => {
+    state.model = v;
+    refresh();
+  });
 }
 
 function renderBatchOptions() {
@@ -81,6 +99,13 @@ function renderBatchOptions() {
     state.bs = v;
     refresh();
   });
+}
+
+function sizeSub(g) {
+  if (g.model_mb == null) return "rebuild the latency table to see sizes";
+  const parts = [g.size_saving_pct >= 0.5 ? `${g.size_saving_pct.toFixed(0)}% smaller than FP16` : "same as FP16"];
+  if (g.measured && g.measured.gpu_footprint_mb != null) parts.push(`${fmt.mb(g.measured.gpu_footprint_mb)} on the GPU`);
+  return parts.join(" · ");
 }
 
 function bits(config) {
@@ -118,6 +143,7 @@ function renderSelection(sel) {
   const testSub = g.test_acc != null ? `test accuracy ${g.test_acc.toFixed(2)}%` : `val accuracy ${g.val_acc.toFixed(2)}%`;
   const metrics = [
     ["Speedup vs FP16", fmt.x(g.speedup), `${g.config.split("1").length - 1} of 10 units in INT8`],
+    ["Model size", g.model_mb != null ? fmt.mb(g.model_mb) : "n/a", sizeSub(g)],
     ["Latency", fmt.ms(latency), latencySub],
     ["Accuracy change", fmt.pp(g.drop_pp), testSub],
     ["Evaluations", `${g.n_evals}`, `of ${sel.space} · ${Math.abs(g.gap_pct) < 0.05 ? "matches the optimum" : `${g.gap_pct.toFixed(1)}% slower than optimum`}`],
@@ -139,6 +165,7 @@ function renderSelection(sel) {
       el("td", {}, bits(m.config)),
       el("td", { class: "num", text: fmt.pp(m.drop_pp) }),
       el("td", { class: "num", text: fmt.ms(lat) }),
+      el("td", { class: "num", text: m.model_mb != null ? fmt.mb(m.model_mb) : "n/a" }),
       el("td", { class: "num", text: fmt.x(m.speedup) }),
       el("td", { class: "num", text: m.method.startsWith("all-") ? "1" : String(m.n_evals) }),
       el("td", {}, el("span", {
@@ -150,9 +177,10 @@ function renderSelection(sel) {
   const measured = sel.methods.some((m) => m.measured);
   const backend = (state.meta.gpus.find((x) => x.id === state.gpu) || {}).backend;
   const source = { trt: "TensorRT", torch: "PyTorch CUDA", mock: "mock backend, simulated — not a benchmark" }[backend] || backend;
+  const model = sel.latency_model === "context" ? "context-aware estimate" : "additive lookup-table estimate";
   $("#compare-note").textContent = measured
-    ? `Latency: measured full-model median (${source}) where available, otherwise lookup-table estimate.`
-    : `Latency: lookup-table estimate from per-unit ${source} timings.`;
+    ? `Latency: measured full-model median (${source}) where available, otherwise the ${model}.`
+    : `Latency: ${model} (${source}).`;
   void opt;
 }
 
@@ -164,6 +192,7 @@ function refresh() {
     main.classList.add("is-loading");
     try {
       const q = new URLSearchParams({ gpu: state.gpu, batch_size: state.bs, budget: state.budget });
+      if (state.model) q.set("latency_model", state.model);
       state.selection = await api(`/api/select?${q}`);
       renderSelection(state.selection);
       if (state.sample != null) predict();

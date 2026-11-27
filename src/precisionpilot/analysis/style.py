@@ -21,6 +21,7 @@ NEUTRAL_LIGHT = "#d9d9d9"
 METHOD_COLORS = {
     "greedy-skip": "#257de0",     # slot 1 blue   - proposed
     "greedy-skip+ls": "#257de0",
+    "greedy-dyn": "#257de0",
     "greedy-stop": "#257de0",
     "random": "#f47230",          # slot 2 orange
     "exhaustive": "#00b894",      # slot 3 aqua
@@ -29,6 +30,7 @@ METHOD_LABELS = {
     "greedy-skip": "Sensitivity-guided greedy (ours)",
     "greedy-stop": "Greedy, stop at first violation",
     "greedy-skip+ls": "Greedy + local search",
+    "greedy-dyn": "Context-aware greedy (ours)",
     "random": "Random search (same evals)",
     "exhaustive": "Exhaustive (optimum)",
     "all-fp16": "All-FP16",

@@ -25,6 +25,7 @@ from precisionpilot.experiments.search_suite import chosen_configs, run_search_s
 from precisionpilot.experiments.verify import run_backend_accuracy, run_verify
 from precisionpilot.experiments.workspace import make_workspace, resolve_gpu_slug
 from precisionpilot.latency.backends.base import get_backend
+from precisionpilot.latency.context import ContextLatencyTable, measure_training_set
 from precisionpilot.latency.lut import LatencyTable, build_lut
 from precisionpilot.search.common import TableAccuracy
 
@@ -64,6 +65,20 @@ def run_gpu(ws, backend, gpu: str | None = None, skip_lut: bool = False,
         lut.save(lut_path)
         log(f"saved {lut_path}")
 
+    ctx, train_configs = None, set()
+    if cfg.latency.context_model:
+        train_path = gdir / "ctx_train.csv"
+        if skip_lut and train_path.exists():
+            train = pd.read_csv(train_path, dtype={"config": str})
+        else:
+            train = measure_training_set(ws.mm, backend, bss, ws.image_size,
+                                         cfg.latency.context_random, cfg.seed, log)
+            train.to_csv(train_path, index=False)
+        ctx = ContextLatencyTable.from_measurements(lut, train)
+        ctx.save(gdir / "ctx_model.csv")
+        train_configs = set(train["config"])
+        log(f"saved {gdir / 'ctx_model.csv'} (fitted on {len(train_configs)} configs/bs)")
+
     ref = acc_exp.load_reference(ws)
     table = TableAccuracy.from_csv(ws.accuracy_dir / "accuracy_table.csv")
     registered = list(cfg.budget.sweep_pp)
@@ -71,14 +86,16 @@ def run_gpu(ws, backend, gpu: str | None = None, skip_lut: bool = False,
     results, curve = run_search_suite(table, ref["fp32_val_subset"], lut, gpu, bss,
                                       sorted(registered + supplementary), cfg.search.random_seeds,
                                       cfg.search.epsilon, ref.get("sec_per_eval", 0.0),
-                                      ws.mm.n_units, log, supplementary=supplementary)
+                                      ws.mm.n_units, log, supplementary=supplementary,
+                                      ctx_model=ctx)
     results.to_csv(gdir / "search_results.csv", index=False)
     curve.to_csv(gdir / "random_curve.csv", index=False)
     log(f"saved {gdir / 'search_results.csv'}")
 
     out = {"gpu": gpu, "results": results}
     if not skip_verify:
-        verify = run_verify(ws, backend, lut, results, bss, log)
+        verify = run_verify(ws, backend, lut, results, bss, log, ctx=ctx,
+                            ctx_train=train_configs)
         verify.to_csv(gdir / "verify.csv", index=False)
         log(f"saved {gdir / 'verify.csv'}")
         out["verify"] = verify
@@ -107,6 +124,7 @@ def smoke(cfg_overrides: list[str] | None = None, log=print, threads: int = 2) -
     overrides = ["paths.results_dir=results/smoke", "data.image_size=16",
                  "data.eval_batch_size=64", "latency.reps=10", "search.random_seeds=3",
                  "latency.batch_sizes=[1,32]", "quant.calib_batches=1", "budget.extra_pp=[0.2]",
+                 "latency.context_random=4",
                  *(cfg_overrides or [])]
     cfg = load_config(overrides=overrides)
     ws = make_workspace(cfg, "cpu", fake=True, fake_size="tiny")

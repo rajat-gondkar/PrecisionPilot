@@ -80,6 +80,22 @@ class LatencyTable:
 
         return fn
 
+    # -- model size (weights; hardware independent) ---------------------------
+    def unit_params(self) -> list[int]:
+        """Parameter count per unit (BN folded). Needs the ``params`` column."""
+        if "params" not in self.df.columns:
+            raise ValueError("latency table has no 'params' column (rebuild it)")
+        first = self.df[self.df["batch_size"] == self.batch_sizes[0]]
+        first = first.drop_duplicates("unit").sort_values("unit")
+        return [int(v) for v in first["params"]]
+
+    def model_mb(self, cfg: Sequence[int]) -> float:
+        """Weight storage of a configuration: 2 bytes/param for FP16 units, 1 for INT8 units.
+
+        Per-channel INT8 scales (4 bytes per output channel, ~0.1 % of the weights) are ignored.
+        """
+        return sum(p * (1 if b else 2) for p, b in zip(self.unit_params(), cfg)) / 1e6
+
     def savings(self, batch_size: int) -> list[float]:
         """FP16 - INT8 latency per unit (positive = INT8 faster)."""
         return [self.unit_ms(batch_size, i, FP16) - self.unit_ms(batch_size, i, INT8)
@@ -98,6 +114,7 @@ def build_lut(mm, backend, batch_sizes: Iterable[int], image_size: int = 224,
                 st = backend.measure_unit(mm, i, prec, shapes[i])
                 rows.append({"gpu": backend.device_name, "backend": backend.name,
                              "notes": backend.notes, "batch_size": bs, "unit": i, "name": name,
+                             "params": sum(q.numel() for q in mm.fp32_units[i].parameters()),
                              "precision": PREC_NAME[prec], "input_shape": "x".join(
                                  map(str, shapes[i])), **st.to_dict()})
                 log(f"bs={bs:<3} unit {i} {name:<9} {PREC_NAME[prec]}: "
@@ -107,8 +124,14 @@ def build_lut(mm, backend, batch_sizes: Iterable[int], image_size: int = 224,
 
 def verify_configs(mm, backend, table: LatencyTable, cfgs: Iterable[Sequence[int]],
                    batch_size: int, image_size: int = 224, labels: Iterable[str] | None = None,
-                   log=print) -> pd.DataFrame:
-    """Measure full-model latency for configs and compare with the LUT estimate."""
+                   log=print, ctx=None, ctx_train: Iterable[str] = ()) -> pd.DataFrame:
+    """Measure full-model latency for configs and compare with the LUT estimate.
+
+    If a context-aware model ``ctx`` is given, its estimate and error are added, together with
+    ``ctx_trained`` (True if the configuration was part of the model's fitting data, so its error
+    is not a held-out error).
+    """
+    trained = set(ctx_train)
     cfgs = [tuple(c) for c in cfgs]
     labels = list(labels) if labels is not None else [""] * len(cfgs)
     rows = []
@@ -121,7 +144,13 @@ def verify_configs(mm, backend, table: LatencyTable, cfgs: Iterable[Sequence[int
                "measured_median_ms": st.median_ms, "measured_p95_ms": st.p95_ms,
                "throughput_ips": st.throughput(batch_size),
                "error_pct": 100.0 * (est - st.median_ms) / st.median_ms, **info}
+        if ctx is not None:
+            cest = ctx.estimate(cfg, batch_size)
+            row.update({"ctx_estimated_ms": cest,
+                        "ctx_error_pct": 100.0 * (cest - st.median_ms) / st.median_ms,
+                        "ctx_trained": cfg_to_str(cfg) in trained})
         rows.append(row)
+        extra = f"  ctx {row['ctx_estimated_ms']:.3f} ({row['ctx_error_pct']:+.1f}%)" if ctx else ""
         log(f"bs={batch_size:<3} {cfg_to_str(cfg)} {label:<14} est {est:.3f} ms  "
-            f"real {st.median_ms:.3f} ms  err {row['error_pct']:+.1f}%")
+            f"real {st.median_ms:.3f} ms  err {row['error_pct']:+.1f}%{extra}")
     return pd.DataFrame(rows)

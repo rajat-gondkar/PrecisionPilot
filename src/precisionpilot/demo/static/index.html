@@ -46,6 +46,10 @@
           <legend class="label">Batch size</legend>
           <div class="segmented" id="bs-options" role="radiogroup"></div>
         </fieldset>
+        <fieldset class="control" id="model-control" hidden>
+          <legend class="label">Latency model</legend>
+          <div class="segmented" id="model-options" role="radiogroup"></div>
+        </fieldset>
         <div class="control control--grow">
           <label class="label" for="budget">Accuracy budget
             <span class="label__hint">max drop vs FP32</span></label>
@@ -82,6 +86,7 @@
                 <th scope="col">Configuration</th>
                 <th scope="col" class="num">Accuracy change</th>
                 <th scope="col" class="num">Latency</th>
+                <th scope="col" class="num">Weights</th>
                 <th scope="col" class="num">Speedup</th>
                 <th scope="col" class="num">Evaluations</th>
                 <th scope="col">Budget</th>
@@ -133,8 +138,9 @@
         <li>
           <span class="steps__n mono">02</span>
           <h3>Score</h3>
-          <p>Rank units by latency saved per accuracy point lost, using per-unit timings
-             measured on the target GPU at the target batch size.</p>
+          <p>Rank units by latency saved per accuracy point lost. The context-aware model
+             accounts for neighbouring INT8 units sharing a conversion, which per-unit
+             timings alone miss.</p>
         </li>
         <li>
           <span class="steps__n mono">03</span>

@@ -127,7 +127,8 @@ a { color: inherit; }
   display: grid; gap: var(--s5); margin-top: var(--s7);
   grid-template-columns: 1fr;
 }
-@media (min-width: 860px) { .controls { grid-template-columns: auto auto 1fr; align-items: end; gap: var(--s6); } }
+@media (min-width: 860px) { .controls { grid-template-columns: repeat(3, auto) 1fr; align-items: end; gap: var(--s6); } }
+.controls:has(#model-control[hidden]) { grid-template-columns: repeat(2, auto) 1fr; }
 .control { border: 0; margin: 0; padding: 0; min-width: 0; }
 .label {
   display: block; font-size: var(--t-sm); font-weight: 500; color: var(--ink-2);
@@ -183,11 +184,13 @@ a { color: inherit; }
   display: grid; gap: var(--s5) var(--s6); margin: var(--s7) 0 0;
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
-@media (min-width: 860px) { .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (min-width: 860px) { .metrics { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
+.metric:last-child:nth-child(odd) { grid-column: 1 / -1; }
+@media (min-width: 860px) { .metric:last-child:nth-child(odd) { grid-column: auto; } }
 .metric { padding-top: var(--s4); border-top: 1px solid var(--line); }
 .metric dt { font-size: var(--t-sm); color: var(--ink-2); }
 .metric dd { margin: var(--s2) 0 0; }
-.metric__value { font-size: var(--t-2xl); font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.metric__value { font-size: var(--t-xl); font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
 .metric__sub { display: block; margin-top: var(--s1); font-size: var(--t-sm); color: var(--ink-3); }
 
 /* table */

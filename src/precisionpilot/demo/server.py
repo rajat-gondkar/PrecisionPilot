@@ -21,12 +21,13 @@ import numpy as np
 import pandas as pd
 
 from precisionpilot.data import CIFAR10_CLASSES
+from precisionpilot.latency.context import ContextLatencyTable
 from precisionpilot.latency.lut import LatencyTable
 from precisionpilot.model import UNIT_NAMES
 from precisionpilot.precision import FP16, INT8, all_fp16, all_int8, str_to_cfg
 from precisionpilot.search.common import Evaluator, TableAccuracy
 from precisionpilot.search.exhaustive import exhaustive_search
-from precisionpilot.search.greedy import greedy_search
+from precisionpilot.search.greedy import greedy_dynamic, greedy_search
 from precisionpilot.utils import load_json
 
 STATIC = Path(__file__).parent / "static"
@@ -50,10 +51,14 @@ class DemoState:
         self.final_test = pd.read_csv(acc / "final_test.csv", dtype={"config": str}) \
             if (acc / "final_test.csv").exists() else None
         self.luts: dict[str, LatencyTable] = {}
+        self.ctx: dict[str, ContextLatencyTable] = {}
         self.verify: dict[str, pd.DataFrame] = {}
         for lut_path in sorted(self.results.glob("*/lut.csv")):
             gpu = lut_path.parent.name
             self.luts[gpu] = LatencyTable.load(lut_path)
+            ctx_path = lut_path.parent / "ctx_model.csv"
+            if ctx_path.exists():
+                self.ctx[gpu] = ContextLatencyTable.load(ctx_path)
             v = lut_path.parent / "verify.csv"
             if v.exists():
                 self.verify[gpu] = pd.read_csv(v, dtype={"config": str})
@@ -75,7 +80,9 @@ class DemoState:
             "ready": self.ready,
             "results_dir": str(self.results),
             "gpus": [{"id": g, "label": _gpu_label(g, lut.gpu), "batch_sizes": lut.batch_sizes,
-                      "backend": lut.backend} for g, lut in self.luts.items()],
+                      "backend": lut.backend, "has_context_model": g in self.ctx,
+                      "has_model_size": "params" in lut.df.columns}
+                     for g, lut in self.luts.items()],
             "units": list(UNIT_NAMES),
             "budgets": list(self.cfg.budget.sweep_pp),
             "main_budget": self.cfg.budget.main_pp,
@@ -86,8 +93,14 @@ class DemoState:
         }
 
     # ---------------------------------------------------------------- selection
-    def select(self, gpu: str, batch_size: int, budget: float) -> dict:
-        return _select_cached(self, gpu, int(batch_size), round(float(budget), 2))
+    def select(self, gpu: str, batch_size: int, budget: float,
+               latency_model: str | None = None) -> dict:
+        """``latency_model``: "context" (default when fitted) or "additive"."""
+        if latency_model is None:
+            latency_model = "context" if gpu in self.ctx else "additive"
+        if latency_model == "context" and gpu not in self.ctx:
+            raise KeyError(f"no context-aware latency model for {gpu}")
+        return _select_cached(self, gpu, int(batch_size), round(float(budget), 2), latency_model)
 
     def _measured(self, gpu: str, batch_size: int, config: str) -> dict | None:
         v = self.verify.get(gpu)
@@ -97,8 +110,12 @@ class DemoState:
         if not len(row):
             return None
         r = row.iloc[0]
-        return {"median_ms": float(r.measured_median_ms), "p95_ms": float(r.measured_p95_ms),
-                "throughput_ips": float(r.throughput_ips)}
+        out = {"median_ms": float(r.measured_median_ms), "p95_ms": float(r.measured_p95_ms),
+               "throughput_ips": float(r.throughput_ips)}
+        for col in ("engine_mb", "activation_memory_mb", "gpu_footprint_mb"):
+            if col in r.index and pd.notna(r[col]):
+                out[col] = float(r[col])
+        return out
 
     def _test_acc(self, config: str) -> float | None:
         if self.final_test is None:
@@ -107,7 +124,12 @@ class DemoState:
         return float(row.test_acc.iloc[0]) if len(row) else None
 
     def _describe(self, name, res, gpu, bs, fp16_lat, opt_lat) -> dict:
+        lut = self.luts[gpu]
+        size = lut.model_mb(res.cfg) if "params" in lut.df.columns else None
+        fp16_size = lut.model_mb(all_fp16()) if size is not None else None
         return {
+            "model_mb": size,
+            "size_saving_pct": (100.0 * (1 - size / fp16_size) if size is not None else None),
             "method": name, "config": res.config, "val_acc": res.val_acc,
             "drop_pp": res.drop_pp, "feasible": res.feasible, "n_evals": res.n_evals,
             "est_latency_ms": res.latency, "speedup": fp16_lat / res.latency,
@@ -170,18 +192,21 @@ class DemoState:
 
 
 @lru_cache(maxsize=512)
-def _select_cached(state: DemoState, gpu: str, bs: int, budget: float) -> dict:
+def _select_cached(state: DemoState, gpu: str, bs: int, budget: float,
+                   latency_model: str = "additive") -> dict:
     if not state.ready:
         raise RuntimeError("results not available")
     lut = state.luts[gpu]
-    lat = lut.latency_fn(bs)
+    lat = (state.ctx[gpu] if latency_model == "context" else lut).latency_fn(bs)
     ref = state.reference["fp32_val_subset"]
 
     def ev():
         return Evaluator(state.table, lat, ref, budget)
 
     ex, _ = exhaustive_search(ev())
-    greedy = greedy_search(ev(), epsilon=state.cfg.search.epsilon)
+    eps = state.cfg.search.epsilon
+    greedy = (greedy_dynamic(ev(), epsilon=eps) if latency_model == "context"
+              else greedy_search(ev(), epsilon=eps))
     fp16_lat, opt = lat(all_fp16()), ex.latency
     from precisionpilot.search.common import make_result
 
@@ -196,7 +221,7 @@ def _select_cached(state: DemoState, gpu: str, bs: int, budget: float) -> dict:
               "fp16_ms": lut.unit_ms(bs, i, FP16), "int8_ms": lut.unit_ms(bs, i, INT8)}
              for i, n in enumerate(UNIT_NAMES)]
     return {"gpu": gpu, "batch_size": bs, "budget": budget, "reference_acc": ref,
-            "methods": rows, "units": units, "space": 1024}
+            "latency_model": latency_model, "methods": rows, "units": units, "space": 1024}
 
 
 def _gpu_label(slug: str, name: str) -> str:
@@ -245,7 +270,7 @@ def create_app(state: DemoState):
         return state.meta()
 
     @app.get("/api/select")
-    def select(gpu: str, batch_size: int, budget: float):
+    def select(gpu: str, batch_size: int, budget: float, latency_model: str | None = None):
         if not state.ready:
             raise HTTPException(409, "No results yet: run the accuracy and GPU stages first.")
         if gpu not in state.luts:
@@ -254,7 +279,12 @@ def create_app(state: DemoState):
             raise HTTPException(404, f"batch size {batch_size} not measured on {gpu}")
         if not 0 <= budget <= 10:
             raise HTTPException(400, "budget must be between 0 and 10 pp")
-        return state.select(gpu, batch_size, budget)
+        if latency_model not in (None, "context", "additive"):
+            raise HTTPException(400, "latency_model must be 'context' or 'additive'")
+        try:
+            return state.select(gpu, batch_size, budget, latency_model)
+        except KeyError as e:
+            raise HTTPException(404, str(e.args[0])) from e
 
     @app.get("/api/samples")
     def samples(n: int = 12):

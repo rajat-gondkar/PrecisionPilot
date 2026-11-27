@@ -1,0 +1,19 @@
+gpu,config,label,engine_test_acc
+Tesla T4,0000000000,all-fp16,96.48
+Tesla T4,1111111111,all-int8,96.64
+Tesla T4,1001001000,random-median@0.1,96.54
+Tesla T4,1000001100,random-median@0.2,96.52
+Tesla T4,0010000010,random-median@0.3,96.5
+Tesla T4,0011111110,greedy-skip@0.1,96.56
+Tesla T4,0111101111,exhaustive@0.1,96.7
+Tesla T4,0011010111,random-median@0.1,96.54
+Tesla T4,0111111110,greedy-skip@0.2,96.58
+Tesla T4,0110110011,random-median@0.2,96.6
+Tesla T4,0100111111,random-median@0.3,96.58
+Tesla T4,0111100110,random-median@0.5,96.64
+Tesla T4,0111111100,greedy-skip+ls@0.1,96.54
+Tesla T4,0111001000,random-median@0.1,96.52
+Tesla T4,0010111111,random-median@0.2,96.5
+Tesla T4,0111111000,random-median@0.3,96.58
+Tesla T4,0111011100,random-median@0.5,96.64
+Tesla T4,0110101110,random-median@1,96.6

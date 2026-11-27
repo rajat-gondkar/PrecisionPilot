@@ -98,7 +98,8 @@ BENCHMARK = notebook([
    `checkpoints/resnet18_cifar10.pt`).
 3. Click **Save Version → Save & Run All (Commit)** (not plain *Run All*). It then runs in the
    background on Kaggle's servers: you can close the browser or sleep. A committed run may take
-   up to 12 hours; this one should take roughly 1–2 hours. The finished version and its output
+   up to 12 hours; this one should take roughly 2–3 hours (it builds ~250 TensorRT engines: the
+   per-unit table, the context-aware latency model's fitting set, and the verification set). The finished version and its output
    files are kept permanently.
 4. When you are back: open the notebook → *Versions* (or the *Output* tab of the latest
    version) → download **`precisionpilot_results_t4.zip`** and unzip it into the repo root.
@@ -111,8 +112,10 @@ each stage, and `status.json` records which stages succeeded. Whatever finished 
    zip and logs are saved as output),
 2. **hardware-independent accuracy** (`run-accuracy`): FP32 / FP16 / INT8 references, accuracy of
    all 1,024 configurations on the validation subset, per-unit sensitivity,
-3. **T4 latency study** (`run-gpu --backend trt`): per-unit lookup table for batch 1/8/32, all
-   search methods x budgets, full-engine verification, real TensorRT test accuracy,
+3. **T4 latency study** (`run-gpu --backend trt`): per-unit lookup table for batch 1/8/32, the
+   context-aware latency model (fitted on full-engine measurements), all search methods x budgets
+   under both latency models, full-engine verification incl. measured GPU memory, real TensorRT
+   test accuracy,
 4. builds the figures and tables.
 """),
     code("!nvidia-smi"),

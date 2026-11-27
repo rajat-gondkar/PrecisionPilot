@@ -136,3 +136,74 @@ def test_gap_and_pareto():
     assert list(pf["latency"]) == [7, 8, 9.5, 10]
     t2 = pd.DataFrame({"val_acc": [95, 90], "latency": [5, 6]})
     assert list(pareto_front(t2)["latency"]) == [5]
+
+
+# ---------------------------------------------------------------- context-aware greedy
+def boundary_problem(n=10, boundary_cost=0.4):
+    """Latency with conversion cost at FP16<->INT8 boundaries: an isolated INT8 unit is *slower*
+    than FP16, but runs of INT8 units are faster."""
+    drops = [0.05] * n
+    f = [1.0] * n
+    g = [0.5] * n
+
+    def lat(c):
+        seq = (0, *c, 0)
+        bound = sum(1 for a, b in zip(seq[:-1], seq[1:]) if a != b)
+        return sum(g[i] if c[i] else f[i] for i in range(n)) + boundary_cost * bound
+
+    def acc(c):
+        return 95.0 - sum(d * b for d, b in zip(drops, c))
+
+    return acc, lat
+
+
+def test_dynamic_greedy_finds_runs_that_static_greedy_cannot():
+    from precisionpilot.search.greedy import greedy_dynamic
+
+    acc, lat = boundary_problem()
+    # each isolated flip: -0.5 (cheaper unit) + 2 * 0.4 boundary = +0.3 -> slower than FP16
+    assert lat((1,) + (0,) * 9) > lat((0,) * 10)
+    static = greedy_search(Evaluator(acc, lat, 95.0, 1.0))
+    assert static.config == "0" * 10  # stuck: no single flip helps
+    dyn = greedy_dynamic(Evaluator(acc, lat, 95.0, 1.0))
+    # no single flip pays off, but an adjacent PAIR does (one conversion pair instead of two);
+    # the pair look-ahead gets the search going and it then extends the run to all-INT8
+    assert dyn.config == "1" * 10
+    ex, _ = exhaustive_search(Evaluator(acc, lat, 95.0, 1.0))
+    assert dyn.latency == pytest.approx(ex.latency)
+    assert any(kind == "flip-pair" for _, kind in dyn.extra["trace"])
+
+
+def test_dynamic_greedy_extends_a_run_and_enables_stem_style_units():
+    from precisionpilot.search.greedy import greedy_dynamic
+
+    # unit 0 alone is slower in INT8 (conversion cost), but beneficial next to an INT8 unit 1
+    n = 10
+    f = [1.0] * n
+    g = [0.5] * n
+    g[1] = 0.1  # unit 1 is so much faster in INT8 that flipping it alone already pays off
+
+    def lat(c):
+        seq = (0, *c, 0)
+        bound = sum(1 for a, b in zip(seq[:-1], seq[1:]) if a != b)
+        return sum(g[i] if c[i] else f[i] for i in range(n)) + 0.4 * bound
+
+    acc = lambda c: 95.0 - 0.05 * sum(c)  # noqa: E731
+    static = greedy_search(Evaluator(acc, lat, 95.0, 1.0))
+    dyn = greedy_dynamic(Evaluator(acc, lat, 95.0, 1.0))
+    ex, _ = exhaustive_search(Evaluator(acc, lat, 95.0, 1.0))
+    assert dyn.latency <= static.latency + 1e-9
+    assert dyn.latency == pytest.approx(ex.latency)       # reaches the optimum
+    assert dyn.config[0] == "1" and dyn.config[1] == "1"  # stem-style unit joined the run
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_dynamic_greedy_feasible_and_matches_static_on_additive_problems(seed):
+    from precisionpilot.search.greedy import greedy_dynamic
+
+    acc, lat, ref = make_problem(seed, interactions=False)
+    dyn = greedy_dynamic(Evaluator(acc, lat, ref, 1.0))
+    static = greedy_search(Evaluator(acc, lat, ref, 1.0))
+    assert dyn.feasible
+    assert dyn.latency == pytest.approx(static.latency)   # same order when latency is additive
+    assert dyn.n_evals <= 1 + N + 2 * N

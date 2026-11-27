@@ -12,12 +12,14 @@ from precisionpilot.precision import str_to_cfg
 
 
 def run_verify(ws, backend, lut: LatencyTable, search_results: pd.DataFrame,
-               batch_sizes: Sequence[int], log=print) -> pd.DataFrame:
+               batch_sizes: Sequence[int], log=print, ctx=None,
+               ctx_train: Sequence[str] = ()) -> pd.DataFrame:
     frames = []
     for bs in batch_sizes:
         pairs = chosen_configs(search_results, bs)
         df = verify_configs(ws.mm, backend, lut, [str_to_cfg(c) for c, _ in pairs], bs,
-                            ws.image_size, labels=[lbl for _, lbl in pairs], log=log)
+                            ws.image_size, labels=[lbl for _, lbl in pairs], log=log, ctx=ctx,
+                            ctx_train=ctx_train)
         frames.append(df)
     return pd.concat(frames, ignore_index=True)
 

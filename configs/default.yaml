@@ -47,6 +47,8 @@ latency:
   warmup: 20
   reps: 100
   cooldown_s: 1.0
+  context_model: true      # fit the context-aware latency model from full-engine measurements
+  context_random: 20       # random configs added to its fitting set (on top of 36 structured ones)
 
 search:
   random_seeds: 20

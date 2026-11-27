@@ -135,6 +135,22 @@ class MockBackend(LatencyBackend):
         return self._terms[key]
 
     def model_info(self, mm, cfg, batch_size, image_size) -> dict:
+        """Analytic memory model (NOT a measurement): weights at 2 / 1 bytes per parameter, peak
+        activation = largest unit's input + output tensor at its precision, plus a copy at every
+        FP16<->INT8 boundary."""
+        from precisionpilot.model import UnitResNet, unit_input_shapes
+
         n_params = [sum(p.numel() for p in u.parameters()) for u in mm.fp32_units]
-        size = sum(n * (1 if b == INT8 else 2) for n, b in zip(n_params, cfg))
-        return {"weights_mb": size / 1e6}
+        weights = sum(n * (1 if b == INT8 else 2) for n, b in zip(n_params, cfg))
+        shapes = self._shapes(mm, batch_size, image_size, UnitResNet, unit_input_shapes)
+        out_shapes = [*shapes[1:], (batch_size, 10)]
+        act = 0.0
+        for i, b in enumerate(cfg):
+            width = 1 if b == INT8 else 2
+            peak = (np.prod(shapes[i]) + np.prod(out_shapes[i])) * width
+            if i > 0 and cfg[i - 1] != b:
+                peak += np.prod(shapes[i]) * (3 - width)   # reformat copy at the boundary
+            act = max(act, peak)
+        return {"weights_mb": weights / 1e6, "engine_mb": weights / 1e6 + 0.4,
+                "activation_memory_mb": act / 1e6,
+                "gpu_footprint_mb": weights / 1e6 + 0.4 + act / 1e6 + 1.0}

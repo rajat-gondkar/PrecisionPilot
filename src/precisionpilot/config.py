@@ -66,6 +66,8 @@ class LatencyCfg:
     warmup: int = 20
     reps: int = 100
     cooldown_s: float = 1.0
+    context_model: bool = True   # also fit the context-aware latency model (needs ~56 engines/bs)
+    context_random: int = 20     # random configurations added to its fitting set
 
 
 @dataclass

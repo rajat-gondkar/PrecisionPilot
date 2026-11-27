@@ -100,3 +100,25 @@ def test_not_ready_state(tmp_path):
     assert c.get("/api/meta").json()["ready"] is False
     assert c.get("/api/select", params={"gpu": "x", "batch_size": 1,
                                         "budget": 1}).status_code == 409
+
+
+def test_context_and_additive_models_and_size(client):
+    base = {"gpu": "mockampere", "batch_size": 32, "budget": 0.2}
+    meta = client.get("/api/meta").json()
+    g = next(x for x in meta["gpus"] if x["id"] == "mockampere")
+    assert g["has_context_model"] and g["has_model_size"]
+    ctx = client.get("/api/select", params={**base, "latency_model": "context"}).json()
+    add = client.get("/api/select", params={**base, "latency_model": "additive"}).json()
+    default = client.get("/api/select", params=base).json()
+    assert ctx["latency_model"] == "context" and add["latency_model"] == "additive"
+    assert default["latency_model"] == "context"          # default when fitted
+    for sel in (ctx, add):
+        m = {x["method"]: x for x in sel["methods"]}
+        assert m["all-fp16"]["size_saving_pct"] == pytest.approx(0.0)
+        assert m["all-int8"]["size_saving_pct"] == pytest.approx(50.0, abs=0.1)
+        assert m["all-int8"]["model_mb"] == pytest.approx(m["all-fp16"]["model_mb"] / 2, rel=1e-3)
+        assert m["greedy"]["feasible"] and m["greedy"]["gap_pct"] >= -1e-9
+    # verified configs carry their measured memory
+    measured = [x["measured"] for x in ctx["methods"] if x["measured"]]
+    assert any("gpu_footprint_mb" in x for x in measured)
+    assert client.get("/api/select", params={**base, "latency_model": "bogus"}).status_code == 400

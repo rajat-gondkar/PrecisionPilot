@@ -7,13 +7,15 @@ import pandas as pd
 from precisionpilot.analysis.style import METHOD_LABELS
 
 SUMMARY_METHODS = ["all-fp16", "all-int8", "greedy-stop", "greedy-skip", "greedy-skip+ls",
-                   "random", "exhaustive"]
+                   "greedy-dyn", "random", "exhaustive"]
 
 
 def summary_table(results: pd.DataFrame) -> pd.DataFrame:
     """One row per (gpu, batch, budget, method); random aggregated over seeds."""
     r = results[results.method.isin(SUMMARY_METHODS)]
     keys = ["gpu", "batch_size", "budget_pp"]
+    if "latency_model" in r.columns:
+        keys.append("latency_model")
     if "budget_kind" in r.columns:
         keys.append("budget_kind")
     agg = (r.groupby([*keys, "method"], sort=False)
@@ -21,10 +23,11 @@ def summary_table(results: pd.DataFrame) -> pd.DataFrame:
                   est_latency_ms=("est_latency_ms", "mean"),
                   speedup=("speedup_vs_fp16", "mean"), gap_pct=("gap_to_opt_pct", "mean"),
                   gap_std=("gap_to_opt_pct", "std"), n_evals=("n_evals", "mean"),
-                  feasible_rate=("feasible", "mean"), config=("config", "first"))
+                  feasible_rate=("feasible", "mean"), config=("config", "first"),
+                  model_mb=("model_mb", "mean"))
              .reset_index())
     agg["method_order"] = agg.method.map({m: i for i, m in enumerate(SUMMARY_METHODS)})
-    agg = agg.sort_values(["gpu", "batch_size", "budget_pp", "method_order"])
+    agg = agg.sort_values([*keys, "method_order"])
     agg.loc[agg.method == "random", "config"] = "(varies)"
     return agg.drop(columns="method_order").reset_index(drop=True)
 

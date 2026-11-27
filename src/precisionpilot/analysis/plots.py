@@ -70,6 +70,7 @@ def plot_cost_vs_quality(results: pd.DataFrame, curve: pd.DataFrame, path: Path,
     # greedy variants often coincide: hollow outer shapes + filled inner dot stay readable
     for method, marker, size, filled in (("greedy-skip+ls", "D", 190, False),
                                          ("greedy-stop", "s", 120, False),
+                                         ("greedy-dyn", "^", 150, False),
                                          ("greedy-skip", "o", 55, True)):
         m = r[r.method == method]
         if len(m):
@@ -116,7 +117,8 @@ def plot_scatter(acc_table: pd.DataFrame, lut_latency, reference_acc: float,
     if len(rnd):
         ax.scatter(rnd.est_latency_ms, rnd.val_acc, s=40, color=METHOD_COLORS["random"],
                    edgecolor=SURFACE, linewidth=2, zorder=5, label=METHOD_LABELS["random"])
-    for method, marker, size in (("exhaustive", "*", 220), ("greedy-skip", "o", 80)):
+    for method, marker, size in (("exhaustive", "*", 220), ("greedy-skip", "o", 80),
+                                 ("greedy-dyn", "^", 90)):
         m = r[r.method == method]
         if len(m):
             ax.scatter(m.est_latency_ms, m.val_acc, s=size, marker=marker, zorder=6,
@@ -163,15 +165,21 @@ def plot_config_heatmap(results: pd.DataFrame, path: Path, method: str = "greedy
 
 # 5 ------------------------------------------------------------------ LUT verification
 def plot_lut_error(verify: pd.DataFrame, path: Path) -> Path:
+    """Estimated vs measured full-model latency: additive table, and (held-out) context model."""
     apply_style()
-    fig, ax = plt.subplots(figsize=(6.0, 4.6))
-    groups = list(verify.groupby("gpu")) if "gpu" in verify else [("", verify)]
-    colors = ["#257de0", "#f47230", "#00b894"]
-    for (gpu, g), col in zip(groups, colors):
-        ax.scatter(g.measured_median_ms, g.estimated_ms, s=40, color=col, edgecolor=SURFACE,
-                   linewidth=2, label=f"{gpu} (median |err| {g.error_pct.abs().median():.1f}%)")
     from matplotlib.ticker import FuncFormatter, LogLocator
 
+    fig, ax = plt.subplots(figsize=(6.0, 4.6))
+    series = [("Additive lookup table", verify.measured_median_ms, verify.estimated_ms,
+               verify.error_pct, "#f47230")]
+    if "ctx_estimated_ms" in verify.columns:
+        held = verify[~verify.ctx_trained.astype(bool)]
+        if len(held):
+            series.append(("Context-aware model (held-out configs)", held.measured_median_ms,
+                           held.ctx_estimated_ms, held.ctx_error_pct, "#257de0"))
+    for label, x, y, err, col in series:
+        ax.scatter(x, y, s=40, color=col, edgecolor=SURFACE, linewidth=2,
+                   label=f"{label}: median |err| {err.abs().median():.1f}%")
     vals = pd.concat([verify.measured_median_ms, verify.estimated_ms])
     lim = [vals.min() / 1.25, vals.max() * 1.25]
     ax.plot(lim, lim, color=TEXT_2, linewidth=1, linestyle="--")
@@ -187,7 +195,7 @@ def plot_lut_error(verify: pd.DataFrame, path: Path) -> Path:
         axis.set_major_formatter(fmt)
         axis.set_minor_formatter(FuncFormatter(lambda v, _: ""))
     ax.set_xlabel("Measured full-model latency (ms)")
-    ax.set_ylabel("Lookup-table estimate (ms)")
+    ax.set_ylabel("Estimated latency (ms)")
     ax.set_title("Latency estimate vs real measurement")
     ax.legend(loc="upper left", fontsize=8)
     return _save(fig, path)
@@ -197,21 +205,23 @@ def plot_lut_error(verify: pd.DataFrame, path: Path) -> Path:
 def plot_speedups(results: pd.DataFrame, path: Path, budget_pp: float) -> Path:
     apply_style()
     r = results[(results.budget_pp == budget_pp) &
-                results.method.isin(["greedy-skip", "exhaustive", "all-int8"])]
+                results.method.isin(["greedy-skip", "greedy-dyn", "exhaustive", "all-int8"])]
     gpus = sorted(r.gpu.unique())
     bss = sorted(r.batch_size.unique())
-    methods = ["greedy-skip", "exhaustive", "all-int8"]
-    colors = {"greedy-skip": METHOD_COLORS["greedy-skip"],
+    methods = [m for m in ("greedy-skip", "greedy-dyn", "exhaustive", "all-int8")
+               if m in set(r.method)]
+    colors = {"greedy-skip": METHOD_COLORS["greedy-skip"], "greedy-dyn": "#1757ac",
               "exhaustive": METHOD_COLORS["exhaustive"], "all-int8": NEUTRAL}
     fig, axes = plt.subplots(1, len(gpus), figsize=(4.2 * len(gpus), 3.6), sharey=True,
                              squeeze=False)
-    w = 0.26
+    w = 0.8 / max(len(methods), 1)
     for ax, gpu in zip(axes[0], gpus):
         sub = r[r.gpu == gpu]
         for k, m in enumerate(methods):
             vals = [sub[(sub.batch_size == b) & (sub.method == m)].speedup_vs_fp16.mean()
                     for b in bss]
-            ax.bar(np.arange(len(bss)) + (k - 1) * w, vals, width=w - 0.02, color=colors[m],
+            ax.bar(np.arange(len(bss)) + (k - (len(methods) - 1) / 2) * w, vals,
+                   width=w - 0.02, color=colors[m],
                    edgecolor=SURFACE, linewidth=2,
                    label=METHOD_LABELS[m] + (" (may break budget)" if m == "all-int8" else ""))
         ax.axhline(1.0, color=TEXT_2, linewidth=0.8)
@@ -223,4 +233,104 @@ def plot_speedups(results: pd.DataFrame, path: Path, budget_pp: float) -> Path:
     fig.suptitle(f"Estimated speedup by batch size and GPU (budget {budget_pp:g} pp)",
                  x=0.01, ha="left", fontsize=12, fontweight="bold", color=TEXT)
     fig.tight_layout()
+    return _save(fig, path)
+
+
+# 7 ------------------------------------------------------------------ memory
+def plot_memory(mem: pd.DataFrame, path: Path, gpu: str, budget_pp: float) -> Path:
+    """Model size and measured GPU footprint: all-FP16 vs selected mixed config vs all-INT8."""
+    apply_style()
+    m = mem[mem.gpu == gpu]
+    names = ["all-FP16", "selected", "all-INT8"]
+    colors = {"all-FP16": NEUTRAL_LIGHT, "selected": "#257de0", "all-INT8": NEUTRAL}
+    labels = {"all-FP16": "All FP16", "selected": f"Selected mixed (budget {budget_pp:g} pp)",
+              "all-INT8": "All INT8"}
+    bss = sorted(m.batch_size.unique())
+    use_footprint = m.gpu_footprint_mb.notna().any()
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(9.2, 3.8), gridspec_kw={"width_ratios": [1, 2]})
+
+    # left: model size. The selected configuration differs per batch size (at batch 1 INT8 is
+    # usually not worth it), so show the largest batch size, where mixing actually happens.
+    first = m[m.batch_size == bss[-1]].set_index("name")
+    xs = np.arange(len(names))
+    size_col = "model_mb" if m["model_mb"].notna().any() else "engine_mb"   # older results
+    vals = [first.loc[n, size_col] if n in first.index else np.nan for n in names]
+    a1.bar(xs, vals, color=[colors[n] for n in names], width=0.62, edgecolor=SURFACE, linewidth=2)
+    for x, n, v in zip(xs, names, vals):
+        if np.isnan(v):
+            continue
+        sv = first.loc[n].get(f"{size_col}_saving_pct", np.nan)
+        txt = f"{v:.1f}" + (f"\n−{sv:.0f}%" if pd.notna(sv) and abs(sv) > 0.5 else "")
+        a1.annotate(txt, (x, v), xytext=(0, 3), textcoords="offset points", ha="center",
+                    fontsize=8, color=TEXT)
+    a1.set_xticks(xs, ["FP16", "Mixed", "INT8"])
+    a1.set_ylabel("Weights (MB)" if size_col == "model_mb" else "Engine file (MB)")
+    a1.set_title(f"Model size (batch-{bss[-1]} pick)")
+    a1.grid(axis="x", visible=False)
+
+    # right: runtime GPU memory per batch size
+    col = "gpu_footprint_mb" if use_footprint else "activation_memory_mb"
+    if m[col].notna().sum() == 0:
+        a2.text(0.5, 0.5, "runtime memory not measured\n(needs full-engine verification)",
+                ha="center", va="center", transform=a2.transAxes, color=TEXT_2)
+        a2.set_axis_off()
+        fig.suptitle(f"Memory: FP16 vs mixed vs INT8 — {gpu}", x=0.01, ha="left", fontsize=12,
+                     fontweight="bold", color=TEXT)
+        fig.tight_layout()
+        return _save(fig, path)
+    w = 0.26
+    for k, n in enumerate(names):
+        ys = [m[(m.batch_size == b) & (m.name == n)][col].mean() for b in bss]
+        xs2 = np.arange(len(bss)) + (k - 1) * w
+        a2.bar(xs2, ys, width=w - 0.02, color=colors[n], edgecolor=SURFACE, linewidth=2,
+               label=labels[n])
+        if n != "all-FP16":
+            for x, b, y in zip(xs2, bss, ys):
+                sv = m[(m.batch_size == b) & (m.name == n)].get(f"{col}_saving_pct")
+                sv = float(sv.mean()) if sv is not None and len(sv) else np.nan
+                if pd.notna(y) and pd.notna(sv) and abs(sv) >= 0.5:
+                    a2.annotate(f"−{sv:.0f}%" if sv > 0 else f"+{-sv:.0f}%", (x, y),
+                                xytext=(0, 3), textcoords="offset points", ha="center",
+                                fontsize=8, color=TEXT)
+    a2.set_xticks(range(len(bss)), [f"batch {b}" for b in bss])
+    a2.set_ylabel("GPU memory (MB)" if use_footprint else "Activation scratch (MB)")
+    a2.set_title("Runtime GPU memory of the engine" if use_footprint
+                 else "Activation memory (TensorRT scratch)")
+    a2.grid(axis="x", visible=False)
+    a2.set_ylim(top=a2.get_ylim()[1] * 1.12)
+    a2.legend(loc="upper center", bbox_to_anchor=(0.5, -0.14), ncol=3, fontsize=8)
+    fig.suptitle(f"Memory: FP16 vs mixed vs INT8 — {gpu}", x=0.01, ha="left", fontsize=12,
+                 fontweight="bold", color=TEXT)
+    fig.tight_layout()
+    return _save(fig, path)
+
+
+# 8 ------------------------------------------------------------------ latency models, real latency
+def plot_latency_models(table: pd.DataFrame, path: Path, gpu: str, budget_pp: float) -> Path:
+    """Real measured latency of what each latency model selected (greedy), vs the baselines."""
+    apply_style()
+    t = table[(table.gpu == gpu) & np.isclose(table.budget_pp, budget_pp)]
+    bss = sorted(t.batch_size.unique())
+    series = [("All FP16", "all-fp16", NEUTRAL_LIGHT),
+              ("Greedy, additive table", ("additive", "greedy-skip"), "#f47230"),
+              ("Greedy, context-aware (ours)", ("context", "greedy-dyn"), "#257de0"),
+              ("All INT8", "all-int8", NEUTRAL)]
+    fig, ax = plt.subplots(figsize=(7.2, 4.0))
+    w = 0.2
+    for k, (label, key, col) in enumerate(series):
+        ys = []
+        for b in bss:
+            tb = t[t.batch_size == b]
+            if isinstance(key, str):
+                sel = tb[tb.method == key]
+            else:
+                sel = tb[(tb.latency_model == key[0]) & (tb.method == key[1])]
+            ys.append(sel.measured_ms.mean() if len(sel) else np.nan)
+        ax.bar(np.arange(len(bss)) + (k - 1.5) * w, ys, width=w - 0.02, color=col,
+               edgecolor=SURFACE, linewidth=2, label=label)
+    ax.set_xticks(range(len(bss)), [f"batch {b}" for b in bss])
+    ax.set_ylabel("Measured latency (ms, lower is better)")
+    ax.set_title(f"What each latency model selects, measured on {gpu} (budget {budget_pp:g} pp)")
+    ax.grid(axis="x", visible=False)
+    ax.legend(loc="upper left", fontsize=8)
     return _save(fig, path)

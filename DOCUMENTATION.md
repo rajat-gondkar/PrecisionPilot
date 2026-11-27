@@ -2,7 +2,7 @@
 
 *Living technical documentation and report source. Updated at the end of every project phase.*
 
-**Status:** Phases 0–7 implemented. Fine-tuning is done (§7.4); TensorRT benchmarks on the T4 and RTX 3050 Ti are pending.
+**Status:** Phases 0–7 implemented. Fine-tuning (§7.4), the accuracy stage (§7.5) and a first full Tesla T4 TensorRT study (§7.6, additive latency model only) are done. The context-aware latency model (§5.5) and the memory study (§7.7) are implemented; their T4 re-run and the RTX 3050 Ti run are pending.
 
 ---
 
@@ -218,6 +218,44 @@ per-unit precisions (*explicit quantization*, the TensorRT 10 path).
   `L̂(c) = Σ_u t_u(c_u, b)`. `verify_configs` measures selected configurations end to end and
   reports `error % = (L̂ − L) / L`.
 
+#### 5.5.0 Memory metrics
+Four memory numbers are reported for every configuration:
+- `model_mb`: **weights**, computed exactly as 2 bytes per parameter for FP16 units and 1 byte for
+  INT8 units (BatchNorm folded; per-channel INT8 scales add about 0.1% and are ignored). It is
+  hardware independent and is stored with every search result.
+- `engine_mb`: size of the serialized TensorRT engine (weights plus engine metadata).
+- `activation_memory_mb`: TensorRT's per-execution-context scratch memory for activations,
+  which scales with batch size.
+- `gpu_footprint_mb`: **measured** drop in free GPU memory after deserializing the engine,
+  creating its context, allocating the I/O buffers and running it once, taken with
+  `torch.cuda.mem_get_info`. This is what the model occupies on the device on top of the CUDA context.
+
+#### 5.5.1 Context-aware latency model (`latency/context.py`)
+The additive lookup table assumes a unit costs the same in a full engine as alone. The first T4 run
+showed it does not (§7.6): a unit timed alone pays an FP16↔INT8 conversion at both ends, while in a
+real engine neighbouring INT8 units keep the tensor in INT8 and share one conversion. The table
+therefore overestimates INT8-heavy configurations by up to +107%.
+
+The context-aware model keeps the table's structure and adds boundary costs. With virtual FP16
+neighbours before the first and after the last unit, for a configuration `c` (`c_u = 1` for INT8):
+
+`L(c) = Σ_u [ (1 − c_u)·f_u + c_u·g_u ] + Σ_k [ c_(k−1) ≠ c_k ]·h_k`
+
+where `f_u`, `g_u` are the unit's costs in FP16 / INT8 *inside a full engine* and `h_k`
+(k = 0 … N) is the cost of an FP16↔INT8 boundary at position k. A run of INT8 units pays
+conversions only at its two ends. This is a linear model with 3N + 1 = 31 parameters per batch size,
+fitted by **ridge regression** to full-engine latencies:
+- Fitting set per batch size (56 configurations with the default 20 random ones): all-FP16, all-INT8,
+  every single-unit flip in both directions, every INT8 prefix and suffix, and 20 seeded random
+  configurations.
+- Ridge prior: the isolated-unit table (`f`, `g`) with zero boundary costs, so scarce data degrades
+  gracefully to the additive table.
+- It models latency only. Accuracy still comes from real evaluations.
+- Quality is judged on **held-out** configurations: verification configurations that were not in the
+  fitting set are reported separately (`ctx_trained` column in `verify.csv`).
+- On the mock backend (a synthetic world with the same kind of boundary effects) the held-out mean
+  error falls from 2.0% to 0.2% (`tests/test_context.py`). Real numbers come from the T4 re-run.
+
 ### 5.6 Search (`search/`)
 All methods share an `Evaluator`:
 - It measures accuracy on validation data only.
@@ -235,6 +273,16 @@ The methods:
    order. A flip that breaks the budget is backed off, then the search either continues with
    the next unit (`greedy-skip`, the main variant) or stops (`greedy-stop`). The cost is at
    most 11 + 10 evaluations.
+3b. **Dynamic greedy** (`greedy.py: greedy_dynamic`, the method used with the context-aware model).
+   The static greedy ranks units once by their *isolated* saving, which goes stale when a unit's
+   benefit depends on its neighbours (an INT8 stem only pays off once `layer1.0` is INT8 too). The
+   dynamic variant re-scores every FP16 unit at each step by its **marginal** latency gain in the
+   *current* configuration, read from the latency model (free, no evaluation), divided by its
+   accuracy cost from the sensitivity scan: `gain_u / max(drop_u, ε)`. The best unit is tried and
+   kept if the budget still holds, otherwise banned. If no single flip gains anything it looks one
+   step ahead at adjacent **pairs** (a run of two INT8 units pays the conversion once, not twice).
+   It stops when no unit or pair has a positive gain. With an additive latency model the order is
+   identical to the static greedy (checked by tests).
 4. **Local search** (`local_search.py`, optional). Neighbours of the current config are single
    additions and pairwise swaps. Only neighbours with lower estimated latency are evaluated,
    fastest first, and the first feasible improvement is accepted. The result is never worse
@@ -263,7 +311,7 @@ into selection.
 
 **Why there are supplementary budgets.** The pre-registered budgets and the main budget were set
 before any result existed and are unchanged. After the first accuracy run showed that *every*
-configuration is within budget at 1 pp and 2 pp (§7.6), the accuracy constraint cannot influence
+configuration is within budget at 1 pp and 2 pp (§7.5), the accuracy constraint cannot influence
 the choice there. Three tighter budgets (0.1, 0.2, 0.3 pp) were therefore **added afterwards**, so
 the constrained search can actually be tested. They are tagged `budget_kind = supplementary` in
 every results table and are always reported separately from the pre-registered ones; nothing
@@ -302,7 +350,7 @@ accuracy stage that runs once and a latency stage that runs on every GPU:
 | Stage | Module | Runs on | Outputs |
 |---|---|---|---|
 | `run-accuracy` | `experiments/accuracy.py` | Kaggle T4 | `results/accuracy/reference.json` (FP32 / all-FP16 / all-INT8 on val_subset, val and test, plus seconds per evaluation), `accuracy_table.csv` (all 1,024 configs on val_subset), `sensitivity.csv` (Experiment 1, full val) |
-| `run-gpu` | `experiments/pipeline.py`, `search_suite.py`, `verify.py` | RTX 3050 Ti and T4 | `results/<gpu>/lut.csv`, `search_results.csv`, `random_curve.csv`, `verify.csv`, `engine_accuracy.csv`; `results/accuracy/final_test.csv` |
+| `run-gpu` | `experiments/pipeline.py`, `search_suite.py`, `verify.py` | RTX 3050 Ti and T4 | `results/<gpu>/lut.csv`, `ctx_train.csv` + `ctx_model.csv` (context-aware latency model), `search_results.csv`, `random_curve.csv`, `verify.csv`, `engine_accuracy.csv`; `results/accuracy/final_test.csv` |
 | `report` | `analysis/report.py` | anywhere | `results/figures/*.png`, `results/tables/*.md / .csv` |
 
 **Exhaustive accuracy table (prefix-tree evaluation).**
@@ -319,10 +367,18 @@ accuracy stage that runs once and a latency stage that runs on every GPU:
   `reference.json`).
 - The searches make exactly the same decisions they would make running the model live.
 
+**Two latency models.** Every method is run once under the additive lookup table and once under
+the context-aware model; rows carry a `latency_model` column (`additive` | `context`) and the main
+figures use `context` when present. Search accuracy decisions are identical in both; only the latency
+model differs, which isolates its effect. The context model's fitting needs about 56 extra full-engine
+builds per batch size (`latency.context_random` controls the random part, `latency.context_model`
+switches the whole step off).
+
 **Search suite (Experiments 2–5).**
 - For each GPU × batch size {1, 8, 32} × budget {0.5, 1, 2 pp pre-registered; 0.1, 0.2, 0.3 pp
   supplementary}, the suite runs: all-FP16,
-  all-INT8, greedy-skip, greedy-stop, greedy-skip + local search, random search (20 seeds,
+  all-INT8, greedy-skip (static), greedy-stop, greedy-skip + local search, greedy-dyn (dynamic),
+  random search (20 seeds,
   each with the same number of evaluations as greedy-skip), and exhaustive search.
 - It records the configuration, validation accuracy, drop vs FP32, estimated latency, speedup
   over all-FP16, gap to the optimum, number of evaluations and estimated search time.
@@ -347,12 +403,16 @@ accuracy stage that runs once and a latency stage that runs on every GPU:
 | 4 | `fig4_heatmap_<gpu>.png`, `fig4_heatmap_optimum_<gpu>.png` | INT8 vs FP16 per unit, for every batch size × budget (greedy and optimum) |
 | 5 | `fig5_heatmap_gpus.png` | Greedy selections side by side across GPUs |
 | 6 | `fig6_speedups.png`, `fig6_speedups_b<budget>.png` | Estimated speedup over all-FP16 by batch size and GPU (main budget, and one per supplementary budget) |
-| 7 | `fig7_lut_error.png` | Lookup-table estimate vs measured latency |
+| 7 | `fig7_lut_error.png` | Latency estimate vs measured: additive table and (held-out) context-aware model |
+| 8 | `fig8_memory_<gpu>.png` | Memory: model size, and measured GPU memory per batch size, for all-FP16 vs the selected mixed configuration vs all-INT8 |
+| 9 | `fig9_latency_models_<gpu>.png` | **Measured** latency of what each latency model selected (additive greedy vs context-aware greedy) next to all-FP16 and all-INT8 |
 
 Figures 2, 3 and 6 are produced for the main budget and for every supplementary budget.
 
-Tables: `summary.md/csv` (every method × GPU × batch × budget, with random search averaged
-over seeds), `sensitivity.md`, `verify.md`, `final_test.md`.
+Tables: `summary.md/csv` (every method × GPU × batch × budget × latency model, with random search
+averaged over seeds), `sensitivity.md`, `verify.md`, `final_test.md`, `memory.md/csv`,
+`latency_model_comparison.md/csv` (measured latency of every selection under each model) and
+`latency_model_error.md/csv` (estimate error of both models).
 
 Figure style:
 - A fixed colour per method: the proposed greedy method is blue, random search orange and
@@ -363,12 +423,13 @@ Figure style:
 ### 7.3 Status
 | # | Experiment | What it shows | Status |
 |---|---|---|---|
-| 1 | Per-unit sensitivity scan | Which units are fragile | implemented; awaiting GPU run |
-| 2 | Search cost vs result quality | Evaluations vs final latency (main chart) | implemented; awaiting GPU run |
-| 3 | Accuracy budget sweep (0.5/1/2 pp) | Config change with budget | implemented; awaiting GPU run |
-| 4 | Batch-size variation (1/8/32) | Config change with batch size | implemented; awaiting GPU run |
-| 5 | Second GPU (T4) | Hardware dependence | implemented; awaiting GPU run |
-| 6 | Latency estimation accuracy | LUT vs real TensorRT | implemented; awaiting GPU run |
+| 1 | Per-unit sensitivity scan | Which units are fragile | **done** (§7.5) |
+| 2 | Search cost vs result quality | Evaluations vs final latency (main chart) | **done on T4** (§7.6) |
+| 3 | Accuracy budget sweep (0.5/1/2 pp, plus supplementary 0.1/0.2/0.3) | Config change with budget | **done on T4** (§7.6) |
+| 4 | Batch-size variation (1/8/32) | Config change with batch size | **done on T4** (§7.6) |
+| 5 | Second GPU | Hardware dependence | T4 done; RTX 3050 Ti pending |
+| 6 | Latency estimation accuracy | LUT vs real TensorRT; additive vs context-aware model | additive **done on T4** (§7.6); context-aware pending re-run |
+| 7 | Memory: FP16 vs mixed vs INT8 | Model size, activation and GPU memory | first numbers from T4 (§7.7); measured footprint pending re-run |
 
 ### 7.4 Result: fine-tuning and FP32/FP16 baselines (Kaggle Tesla T4)
 Training ran for 8 epochs (3,000 steps) with AMP and took **426 s** (~52 s per epoch). The log
@@ -396,7 +457,7 @@ The target of at least 95% is met. All-FP16 matches FP32 to within ±0.02 pp, so
 safe reference precision and the accuracy budget is effectively spent on INT8 alone.
 Source: `results/baselines/baselines_t4.json`.
 
-### 7.6 Result: INT8 accuracy on the Tesla T4 (Experiment 1 and the exhaustive table)
+### 7.5 Result: INT8 accuracy on the Tesla T4 (Experiment 1 and the exhaustive table)
 Source: `results/accuracy/` from the first Kaggle benchmark run (`run-accuracy`, 177 s).
 
 | Precision | val_subset (n=1,000) | val (n=5,000) | test (n=5,000) |
@@ -436,11 +497,128 @@ the exhaustive optimum cheaply, but the accuracy-constrained part of the claim c
 tested at budgets of 0.3 pp and below. This is reported as a finding; the pre-registered budgets
 are unchanged and the tighter ones are added separately and labelled (§6.1).
 
+### 7.6 Result: Tesla T4 TensorRT study (Experiments 2–6)
+Source: `results/t4/`, `results/figures/`, `results/tables/`. TensorRT 10.16 on a Kaggle Tesla T4,
+FP16 engine I/O (`notes` column of `lut.csv`: `trt=10.16.1.11 io=fp16`). The `run-gpu` stage took
+1,007 s. Accuracy-side numbers are from §7.5 and are hardware independent; the exhaustive table and
+sensitivity files were **byte-identical** across two separate Kaggle runs, so the pipeline is
+deterministic.
+
+**Per-unit latency (median ms, T4, one unit alone):**
+
+| Unit | bs 1 FP16 | bs 1 INT8 | bs 8 FP16 | bs 8 INT8 | bs 32 FP16 | bs 32 INT8 |
+|---|---|---|---|---|---|---|
+| stem | 0.058 | 0.070 | 0.253 | 0.343 | 1.330 | 1.824 |
+| layer1.0 | 0.041 | 0.051 | 0.209 | 0.176 | 1.087 | 0.735 |
+| layer1.1 | 0.041 | 0.055 | 0.213 | 0.175 | 1.126 | 0.909 |
+| layer2.0 | 0.047 | 0.056 | 0.154 | 0.128 | 0.689 | 0.444 |
+| layer2.1 | 0.043 | 0.053 | 0.156 | 0.125 | 0.544 | 0.438 |
+| layer3.0 | 0.048 | 0.066 | 0.133 | 0.111 | 0.467 | 0.317 |
+| layer3.1 | 0.049 | 0.062 | 0.145 | 0.106 | 0.599 | 0.395 |
+| layer4.0 | 0.090 | 0.098 | 0.158 | 0.137 | 0.413 | 0.266 |
+| layer4.1 | 0.104 | 0.118 | 0.189 | 0.143 | 0.642 | 0.293 |
+| head | 0.034 | 0.037 | 0.034 | 0.038 | 0.038 | 0.043 |
+
+- **Batch size 1:** INT8 is slower than FP16 for *every* unit (+8% to +38%). Per-kernel launch and
+  Q/DQ overhead dominate; there is no compute to save.
+- **Batch sizes 8 and 32:** INT8 is faster for all eight residual blocks (down to 0.46× the FP16
+  time for `layer4.1` at batch 32), but still **slower for the stem and the head**, at every batch size.
+
+**What the search selected (using the lookup table):**
+
+| Batch | Budget | Selected configuration | Note |
+|---|---|---|---|
+| 1 | all budgets | `0000000000` (all-FP16) | INT8 never faster, so the selector correctly keeps FP16 and spends only the 11 sensitivity evaluations (outline §14) |
+| 8, 32 | 0.1 pp | greedy `0011111110`; optimum by the table `0111101111` | greedy is 0.6% (bs 8) / 3.7% (bs 32) slower than the table's optimum |
+| 8, 32 | ≥ 0.2 pp | `0111111110` (stem and head stay FP16), identical to the table's optimum | 18 evaluations, vs 1,024 for exhaustive search |
+
+So **the selected configuration depends on batch size** (none vs eight INT8 units), and on the budget
+at the tightest setting. Greedy needs 18 evaluations (11 for the sensitivity scan plus 7), or only 11 at
+batch size 1 where nothing is flipped. Random search given the same number of evaluations ends up
+4.5% to 11.7% slower than the optimum on average, depending on batch size and budget (the `random`
+rows of `results/t4/search_results.csv`). It needs about 200 evaluations to get within ~3% and still
+has a 65% chance of missing the optimum at 200 (`random_curve.csv`, bs 32, 0.2 pp). Greedy at 0.2 pp
+and above matches the table's optimum at every batch size. At 0.1 pp the pairwise-swap local search
+does **not** help much: it leaves bs 8 unchanged (still 0.58% off, 22 evaluations) and moves bs 32
+from 3.70% to 3.66% off (25 evaluations).
+
+**Experiment 6: how good is the additive latency estimate?** (18 configurations × batch sizes,
+`results/t4/verify.csv`, `fig7_lut_error.png`)
+
+| Batch | Mean error | Range |
+|---|---|---|
+| 1 | −17.4% | −28.9% … +0.6% |
+| 8 | +4.2% | −15.3% … +47.5% |
+| 32 | +28.3% | +10.6% … **+107.0%** |
+
+Median |error| is 15.6%, mean 20.0%, max 107.0%. The error is largest for INT8-heavy
+configurations. A unit measured alone pays an INT8↔FP16 conversion at both ends; in a full engine,
+consecutive INT8 units keep the tensor in INT8 and fuse, so the sum **overestimates INT8 cost**
+(all-INT8 at batch 32: estimated 5.66 ms, measured 2.74 ms). At batch 1 the estimate is
+*below* the measurement (−17% on average); this has not been explained yet.
+
+**Consequence for the selection (measured, full TensorRT engines, T4):**
+
+| Batch | all-FP16 | all-INT8 | greedy @ 0.2 pp (`0111111110`) |
+|---|---|---|---|
+| 1 | 0.657 ms (1,523 img/s) | 0.661 ms (1,512 img/s) | = all-FP16 |
+| 8 | 1.938 ms (4,128 img/s) | **1.005 ms (7,963 img/s)** | 1.229 ms (6,509 img/s) |
+| 32 | 6.173 ms (5,184 img/s) | **2.736 ms (11,695 img/s)** | 3.926 ms (8,151 img/s) |
+
+Greedy gives a real speedup over FP16 (1.58× at batch 8, 1.57× at batch 32), but the lookup table
+wrongly predicts that INT8 stem/head are costly, so the selected configuration is **22% (bs 8) and
+43% (bs 32) slower than all-INT8**, which is within the 0.3 pp budget (its validation drop is exactly
+0.30 pp, on the boundary) and had a *higher* held-out test accuracy than FP32 (96.64% vs 96.48%).
+At 0.1 pp the table's "optimum" (`0111101111`, 4.34 ms at bs 32) is also measurably slower than
+greedy's pick (4.24 ms), so the table's ranking of near-ties is unreliable too. **The search is sound
+with respect to its latency model (it matches the table's exhaustive optimum, cheaply); the
+limiting factor is the accuracy of the additive latency model, not the search algorithm.**
+
+**Real INT8 accuracy vs the simulation** (`engine_accuracy.csv` vs `final_test.csv`, 5,000 test
+images, 18 configurations): the TensorRT engines and the fake-quant simulation agree to within
+**±0.08 pp** on every configuration (mean difference −0.002 pp, none above 0.1 pp). The
+simulation is therefore a faithful accuracy proxy for the real kernels here. On the test split
+no verified configuration is more than 0.02 pp below FP32 (simulated), and the greedy picks are
+0.06–0.14 pp *above* it, which is within noise.
+
+### 7.7 Memory: does mixing INT8 and FP16 save memory?
+Source: `engine_mb` and `activation_memory_mb` in `results/t4/verify.csv` (first T4 run, TensorRT
+10.16). The measured GPU footprint (`gpu_footprint_mb`) and the selections of the context-aware
+model are added by the re-run.
+
+| Batch | Configuration | Engine size (MB) | Activation scratch (MB) |
+|---|---|---|---|
+| 1 | all-FP16 | 22.63 | 2.81 |
+| 1 | all-INT8 | 11.55 (−49%) | 0.60 (−79%) |
+| 8 | all-FP16 | 22.65 | 19.27 |
+| 8 | all-INT8 | 11.57 (−49%) | 4.82 (−75%) |
+| 8 | greedy `0111111110` (additive-table pick) | 11.53 (−49%) | 20.87 (**+8%**) |
+| 32 | all-FP16 | 22.55 | 77.07 |
+| 32 | all-INT8 | 11.54 (−49%) | 19.27 (−75%) |
+| 32 | greedy `0111111110` (additive-table pick) | 11.51 (−49%) | 83.49 (**+8%**) |
+
+**Answer.** Yes for the model itself, but not automatically for runtime activation memory:
+- **Weights / model size: about 49–50% smaller.** FP16 stores 2 bytes per weight and INT8 1 byte,
+  so the engine halves (22.6 MB → 11.5 MB). Any configuration that quantizes the weight-heavy
+  residual blocks gets nearly all of this, because the stem (9.4 K parameters) and the head
+  (5.1 K) hold under 0.2% of the parameters: the greedy pick that leaves both in FP16 is still 49%
+  smaller than all-FP16.
+- **Activation memory: all-INT8 is about 75% smaller** (INT8 tensors are one byte instead of two,
+  and fusion removes some intermediates), but the mixed pick with an **FP16 stem is 8% *larger* than
+  all-FP16**, not smaller. The largest activation tensors are the early ones, and a mixed
+  configuration both keeps them at 2 bytes (the stem stays FP16) and adds reformat buffers at every
+  FP16↔INT8 boundary. This explanation is an inference from the numbers, not separately verified.
+  So if peak activation memory matters, a mixed configuration must also quantize the stem; that is one
+  more reason the additive table's reluctance to quantize it was costly.
+
+The re-run adds `gpu_footprint_mb` (what the engine actually occupies on the device) so the report
+can show the end-to-end saving rather than the two components.
+
 The whole chain is checked end to end by `python -m precisionpilot pipeline --smoke`. That run
 uses synthetic data, random weights and two mock GPU profiles; its numbers only show that the
 code works and are not results.
 
-### 7.5 Interactive demo (`src/precisionpilot/demo/`)
+### 7.8 Interactive demo (`src/precisionpilot/demo/`)
 `python -m precisionpilot demo` starts a small FastAPI server with a single-page frontend
 written in plain HTML, CSS and JavaScript, with no build step.
 
@@ -478,7 +656,18 @@ quantize step is used. A test checks that it matches the native kernel bit for b
   configurations is reported alongside the simulated numbers to quantify this.
 - The latency of a configuration is **estimated** additively from per-unit measurements. Real
   engines fuse across unit boundaries and pay reformat costs at precision changes, so the
-  estimate's error is measured and reported (Experiment 6).
+  estimate's error is measured and reported (Experiment 6). On the T4 the error reaches +107%
+  (median |error| 15.6%) and measurably misleads the selection: the chosen configuration is
+  22–43% slower than all-INT8 at batch sizes 8 and 32 (§7.6).
+- The context-aware model is itself an approximation (a linear model with boundary terms); it cannot
+  represent effects that depend on more than a unit's immediate neighbours. Its error is measured on
+  configurations held out from fitting. Both models are compared on real hardware (§7.6, Experiment 6).
+- Memory figures from TensorRT are for one engine at a static batch size; they exclude the CUDA
+  context and PyTorch's own allocator state.
+- Accuracies for all searches come from a 1,000-image subset (one image = 0.1 pp, standard error
+  about 0.6 pp). Differences of a few tenths of a point between configurations are within noise.
+- All timing results so far are from a single GPU model (Kaggle T4, shared infrastructure; the
+  exact GPU instance can vary between sessions).
 - On machines without CUDA (the Mac), latency comes only from the `mock` analytic backend.
   Those numbers check that the code works and are never reported as results.
 
@@ -506,7 +695,9 @@ See [README.md](README.md) for environment setup on macOS, Windows and Kaggle. A
 | `tests/test_latency.py` | timing statistics, mock backend determinism and profiles, LUT build / estimate / save / load, verification error; `gpu`/`trt`-marked real-hardware tests (TensorRT engine build, engine cache, TRT vs simulated accuracy) |
 | `tests/test_experiments.py` | prefix-tree exhaustive table equals direct per-config evaluation; search suite invariants (exhaustive gap 0, nothing beats the optimum, search-time accounting, random curve); chosen configs; summary table; end-to-end smoke pipeline (all result files + figures); CLI |
 | `tests/test_quant.py` (export) | also: the exporter never moves the live GPU-resident modules to the CPU (regression test for a bug that would have broken the second batch size of the GPU run); the TensorRT INT8 flag is set exactly when the graph has Q/DQ nodes |
+| `tests/test_context.py` | feature construction with virtual FP16 ends; fitting set is unique, structured and deterministic; the model recovers a synthetic boundary-cost world exactly; ridge prior keeps a data-starved fit sane; save/load round trip; on the mock backend the context model has far lower held-out error than the additive table; weight size is 2 / 1 bytes per parameter; memory and latency-model comparison tables; error summary reports only held-out configurations |
 | `tests/test_demo.py` | page and static files; `/api/meta`; selection at arbitrary budgets (optimum costs 1,024 evaluations, greedy feasible and never better than the optimum, budget 0 gives no accuracy loss); input validation (unknown GPU or batch size, out-of-range budget, malformed config); sample and uploaded-image prediction; unreadable upload; not-ready state |
+| `tests/test_search.py` (dynamic greedy) | also: dynamic greedy finds runs of INT8 units that the static greedy cannot (pair look-ahead), extends a run to reach the optimum, and equals static greedy on additive problems |
 | `tests/test_search.py` | 25 random synthetic problems with interacting units: greedy is always feasible, exhaustive equals brute force, local search never makes things worse; greedy optimal on additive problems; skip vs stop; fallbacks; random-search reproducibility and evaluation budget; neighbourhood; gap and Pareto front |
 
 ## 11. Project log
@@ -521,6 +712,7 @@ See [README.md](README.md) for environment setup on macOS, Windows and Kaggle. A
 | 5 | Experiments 1–6, Kaggle T4 benchmark | done (GPU runs pending) |
 | 6 | Plots and summary tables | done |
 | 7 | Web demo | done |
+| 9 | Context-aware latency model, dynamic greedy, memory metrics (added after the first T4 run exposed the additive model's error) | implemented; T4 re-run and RTX 3050 Ti run pending |
 | 8 | Final documentation | — |
 
 ## 12. References

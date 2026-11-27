@@ -58,3 +58,76 @@ def greedy_search(ev: Evaluator, n_units: int = 10, epsilon: float = 0.01,
         cfg = list(all_fp16(n_units))
     extra["fp16_units"] = [i for i, b in enumerate(cfg) if b == FP16]
     return make_result(method, ev, tuple(cfg), **extra)
+
+
+def greedy_dynamic(ev: Evaluator, n_units: int = 10, epsilon: float = 0.01) -> SearchResult:
+    """Context-aware greedy: re-score every unit in the *current* configuration at each step.
+
+    The static greedy above ranks units once, by their isolated saving. With a latency model that
+    is not additive (a unit's benefit depends on its neighbours, e.g. an INT8 stem only pays off
+    once ``layer1.0`` is INT8 as well), that ranking is stale after the first flip. Here:
+
+    1. sensitivity scan (1 + N evaluations) gives each unit's accuracy cost ``d_u``;
+    2. at each step, for every unit still in FP16 and not banned, the *marginal* latency gain
+       ``g_u = L(cfg) - L(cfg + u)`` is read from the latency model (free, no evaluation);
+    3. the unit with the best ``g_u / max(d_u, eps)`` among those with ``g_u > 0`` is tried; if the
+       budget still holds it is kept, otherwise it is banned;
+    4. if no single flip gains anything, look one step ahead at adjacent *pairs* (a run of two INT8
+       units pays the conversion cost once instead of twice);
+    5. stop when neither a unit nor a pair has a positive marginal gain.
+
+    Cost: 1 + N sensitivity evaluations plus one per flip or ban (a few dozen at most). With an
+    additive latency model the order is identical to :func:`greedy_search`.
+    """
+    sens = sensitivity_scan(ev, n_units)
+    cost = dict(zip(sens["unit"].astype(int), sens["drop_vs_fp16"].clip(lower=epsilon)))
+    cfg = list(all_fp16(n_units))
+    banned: set[int] = set()
+    banned_pairs: set[tuple[int, int]] = set()
+    trace = []
+    while True:
+        cur = ev.latency(cfg)
+        cands = []
+        for u in range(n_units):
+            if cfg[u] == INT8 or u in banned:
+                continue
+            cand = list(cfg)
+            cand[u] = INT8
+            gain = cur - ev.latency(cand)
+            if gain > 1e-12:
+                cands.append((gain / cost[u], gain, -u, u, cand))
+        if not cands:
+            # No single flip helps. A run of two adjacent INT8 units pays the conversion cost
+            # once instead of twice, so look one step ahead at adjacent pairs.
+            for u in range(n_units - 1):
+                if cfg[u] == INT8 or cfg[u + 1] == INT8 or (u, u + 1) in banned_pairs:
+                    continue
+                cand = list(cfg)
+                cand[u] = cand[u + 1] = INT8
+                gain = cur - ev.latency(cand)
+                if gain > 1e-12:
+                    cands.append((gain / (cost[u] + cost[u + 1]), gain, -u, (u, u + 1), cand))
+            if not cands:
+                break
+            cands.sort(reverse=True)
+            _, _, _, pair, cand = cands[0]
+            if ev.feasible(cand):
+                cfg = cand
+                trace.append((pair, "flip-pair"))
+            else:
+                banned_pairs.add(pair)
+                trace.append((pair, "backoff-pair"))
+            continue
+        cands.sort(reverse=True)
+        _, _, _, u, cand = cands[0]
+        if ev.feasible(cand):
+            cfg = cand
+            trace.append((u, "flip"))
+        else:
+            banned.add(u)
+            trace.append((u, "backoff"))
+    if not ev.feasible(cfg):
+        cfg = list(all_fp16(n_units))
+    return make_result("greedy-dyn", ev, tuple(cfg), trace=trace,
+                       sensitivity_evals=n_units + 1,
+                       fp16_units=[i for i, b in enumerate(cfg) if b == FP16])
